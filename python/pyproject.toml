@@ -37,6 +37,7 @@ dev = [
 nd2-processor = "ifish_tools.nd2_processor:main"
 rsfish-runner = "ifish_tools.rsfish_runner:main"
 usegment3d = "ifish_tools.usegment3d.cli:main"
+count-matrix = "ifish_tools.countmatrix.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
