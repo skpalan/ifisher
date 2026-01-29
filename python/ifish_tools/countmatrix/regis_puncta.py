@@ -32,6 +32,9 @@ from scipy.ndimage import zoom
 
 logger = logging.getLogger(__name__)
 
+# Default spot radius for registered puncta (µm, typical RS-FISH spot radius)
+DEFAULT_SPOT_RADIUS = 0.015
+
 
 def load_affine_transform(corr_h5_path: Path) -> np.ndarray:
     """
@@ -47,8 +50,12 @@ def load_affine_transform(corr_h5_path: Path) -> np.ndarray:
         MATLAB uses affinetform3d(T') where T' is the transpose.
         We read T and return T.T to match this convention.
     """
-    with h5py.File(corr_h5_path, 'r') as f:
-        T = f['/data'].attrs['T'][:]  # Shape (4, 4)
+    try:
+        with h5py.File(corr_h5_path, 'r') as f:
+            T = f['/data'].attrs['T'][:]  # Shape (4, 4)
+    except Exception as e:
+        logger.error(f"Failed to load affine transform from {corr_h5_path}: {e}")
+        raise
     
     logger.debug(f"Loaded affine transform from {corr_h5_path}")
     return T.T  # Transpose to match MATLAB convention
@@ -95,8 +102,12 @@ def load_displacement_field(D_h5_path: Path) -> np.ndarray:
         MATLAB expects (Ny, Nx, Nz, 3)
         Transpose: (3, Nz, Nx, Ny) → (Ny, Nx, Nz, 3)
     """
-    with h5py.File(D_h5_path, 'r') as f:
-        D_c = f['/data'][:]  # Shape: (3, Nz, Nx, Ny)
+    try:
+        with h5py.File(D_h5_path, 'r') as f:
+            D_c = f['/data'][:]  # Shape: (3, Nz, Nx, Ny)
+    except Exception as e:
+        logger.error(f"Failed to load displacement field from {D_h5_path}: {e}")
+        raise
     
     # Transpose to MATLAB layout: (3, Nz, Nx, Ny) → (Ny, Nx, Nz, 3)
     D_matlab = D_c.transpose(3, 2, 1, 0)
@@ -219,18 +230,22 @@ def load_bbox(bbox_mat_path: Path, var_name: str = 'bbox') -> Dict[str, int]:
         MATLAB bbox structure uses 1-based indexing.
         We preserve the values as-is for compatibility.
     """
-    mat = scipy.io.loadmat(bbox_mat_path)
-    bbox_struct = mat[var_name]
-    
-    # Extract fields from MATLAB struct
-    bbox = {
-        'xmin': int(bbox_struct['xmin'][0, 0][0, 0]),
-        'xmax': int(bbox_struct['xmax'][0, 0][0, 0]),
-        'ymin': int(bbox_struct['ymin'][0, 0][0, 0]),
-        'ymax': int(bbox_struct['ymax'][0, 0][0, 0]),
-        'zmin': int(bbox_struct['zmin'][0, 0][0, 0]),
-        'zmax': int(bbox_struct['zmax'][0, 0][0, 0]),
-    }
+    try:
+        mat = scipy.io.loadmat(bbox_mat_path)
+        bbox_struct = mat[var_name]
+        
+        # Extract fields from MATLAB struct
+        bbox = {
+            'xmin': int(bbox_struct['xmin'][0, 0][0, 0]),
+            'xmax': int(bbox_struct['xmax'][0, 0][0, 0]),
+            'ymin': int(bbox_struct['ymin'][0, 0][0, 0]),
+            'ymax': int(bbox_struct['ymax'][0, 0][0, 0]),
+            'zmin': int(bbox_struct['zmin'][0, 0][0, 0]),
+            'zmax': int(bbox_struct['zmax'][0, 0][0, 0]),
+        }
+    except Exception as e:
+        logger.error(f"Failed to load bbox from {bbox_mat_path}: {e}")
+        raise
     
     logger.debug(f"Loaded bbox from {bbox_mat_path}: {bbox}")
     return bbox
@@ -379,7 +394,7 @@ def register_puncta_for_round(
         'y': puncta_final[:, 1] - 1,
         'z': puncta_final[:, 2] - 1,
         't': 0,
-        'r': 0.015,
+        'r': DEFAULT_SPOT_RADIUS,
         'cell_id': '',
         'parent_id': '',
         'intensity': puncta_final[:, 3]
@@ -443,8 +458,12 @@ def register_brain(
     ref_h5_path = ref_h5_files[0]
     
     # Get pixel size from H5 attributes
-    with h5py.File(ref_h5_path, 'r') as f:
-        pixel_size = f['/data'].attrs.get('element_size_um', [0.108, 0.108, 0.4])[0]
+    try:
+        with h5py.File(ref_h5_path, 'r') as f:
+            pixel_size = f['/data'].attrs.get('element_size_um', [0.108, 0.108, 0.4])[0]
+    except Exception as e:
+        logger.error(f"Failed to load pixel size from {ref_h5_path}: {e}")
+        raise
     
     logger.info(f"Using pixel_size={pixel_size}, ref_step={ref_step}")
     
@@ -517,7 +536,7 @@ def register_brain(
             output_path = output_dir / "pixel" / f"{stub}_regis.csv"
             
             # Register puncta
-            register_puncta_for_round(
+            result = register_puncta_for_round(
                 puncta_csv,
                 T_forward,
                 D_resized,
@@ -526,5 +545,8 @@ def register_brain(
                 ref_step,
                 output_path
             )
+            
+            if result is None:
+                logger.info(f"Skipped {puncta_csv.name} (no puncta remaining after registration)")
     
     logger.info(f"Completed registration for {brain_id}")
