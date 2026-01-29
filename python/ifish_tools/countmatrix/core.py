@@ -3,10 +3,11 @@
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy.io as sio
 import scipy.ndimage as ndi
 import scipy.sparse as sp
 import tifffile
@@ -47,6 +48,62 @@ def extract_clone_from_mask(filename: str) -> str:
     return m.group(1)
 
 
+def load_bbox(bbox_dir: Path, brain_id: str) -> Tuple[int, int]:
+    """Load bounding box offsets from MATLAB bbox_ref.mat.
+
+    Args:
+        bbox_dir: Directory containing brain subdirectories (e.g., regis_downsamp_1121/).
+        brain_id: Brain ID string (e.g., "08").
+
+    Returns:
+        Tuple of (row_offset, col_offset) as 0-based offsets for cropped coordinates.
+        row_offset = bbox.xmin - 1 (MATLAB x = row = numpy dim 1)
+        col_offset = bbox.ymin - 1 (MATLAB y = col = numpy dim 2)
+    """
+    bbox_path = bbox_dir / f"brain{brain_id}" / "ref" / "bbox_ref.mat"
+    if not bbox_path.exists():
+        raise FileNotFoundError(f"Bounding box file not found: {bbox_path}")
+
+    bbox_data = sio.loadmat(bbox_path)
+    bb = bbox_data["bbox"][0, 0]
+    xmin = int(bb["xmin"][0, 0])  # MATLAB 1-based row min
+    ymin = int(bb["ymin"][0, 0])  # MATLAB 1-based col min
+
+    # Convert to 0-based offsets
+    row_offset = xmin - 1
+    col_offset = ymin - 1
+
+    logger.debug(
+        f"Brain {brain_id}: bbox offsets row={row_offset}, col={col_offset}"
+    )
+    return row_offset, col_offset
+
+
+def detect_z_scale(mask_shape: Tuple[int, int, int], max_puncta_z: float) -> int:
+    """Auto-detect z-axis scaling factor between puncta and mask coordinates.
+
+    Round00 (mask source) has 2× z-resolution compared to other rounds (puncta).
+    This function computes the scaling factor to apply to puncta z-coordinates.
+
+    Args:
+        mask_shape: Shape of the mask array (Z, Y, X).
+        max_puncta_z: Maximum z-coordinate found in puncta data.
+
+    Returns:
+        Integer z-scale factor (typically 1 or 2).
+    """
+    # Estimate scale from ratio of mask Z dimension to puncta Z range
+    # Add 1 to max_puncta_z since coordinates are 0-based
+    ratio = mask_shape[0] / (max_puncta_z + 1)
+    z_scale = round(ratio)
+
+    logger.debug(
+        f"Z-scale auto-detection: mask_Z={mask_shape[0]}, "
+        f"max_puncta_z={max_puncta_z:.1f}, ratio={ratio:.3f} → scale={z_scale}"
+    )
+    return z_scale
+
+
 def compute_cell_metadata(mask: np.ndarray) -> pd.DataFrame:
     """Compute cell centroids and sizes from a 3D label mask.
 
@@ -85,38 +142,76 @@ def compute_cell_metadata(mask: np.ndarray) -> pd.DataFrame:
 
 
 def assign_puncta_to_cells(
-    puncta_df: pd.DataFrame, mask: np.ndarray
+    puncta_df: pd.DataFrame,
+    mask: np.ndarray,
+    row_offset: int = 0,
+    col_offset: int = 0,
+    z_scale: int = 1,
 ) -> np.ndarray:
-    """Assign puncta to cells by looking up mask at each punctum's coordinates.
+    """Assign puncta to cells by transforming coordinates and looking up mask.
+
+    Transforms RS-FISH puncta coordinates (uncropped, round01+ z-resolution) to
+    cropped mask coordinates (round00 z-resolution).
+
+    Coordinate mapping:
+        RS-FISH CSV: x=column, y=row, z=slice (ImageJ convention, 0-based)
+        MATLAB bbox:  bbox.x→row(dim1), bbox.y→col(dim2), bbox.z→slice(dim0)
+        Transform:    mask_row = csv_y - row_offset
+                      mask_col = csv_x - col_offset
+                      mask_z   = csv_z × z_scale
 
     Args:
-        puncta_df: DataFrame with columns x, y, z (float coordinates).
-        mask: 3D label mask (Z, Y, X).
+        puncta_df: DataFrame with columns x, y, z (float coordinates, uncropped).
+        mask: 3D label mask (Z, Y, X) in cropped coordinates.
+        row_offset: 0-based row offset (bbox.xmin - 1).
+        col_offset: 0-based col offset (bbox.ymin - 1).
+        z_scale: Z-axis scaling factor (typically 2 for round00 masks).
 
     Returns:
-        1D array of cell labels (0 = unassigned/background).
+        1D array of cell labels (0 = unassigned/background or out-of-bounds).
     """
-    z = np.round(puncta_df["z"].values).astype(int)
-    y = np.round(puncta_df["y"].values).astype(int)
-    x = np.round(puncta_df["x"].values).astype(int)
+    # Transform from uncropped to cropped coordinates
+    # RS-FISH: csv_y = row, csv_x = col
+    mask_row = np.round(puncta_df["y"].values - row_offset).astype(int)
+    mask_col = np.round(puncta_df["x"].values - col_offset).astype(int)
+    mask_z = np.round(puncta_df["z"].values * z_scale).astype(int)
 
-    # Clip to mask bounds
-    z = np.clip(z, 0, mask.shape[0] - 1)
-    y = np.clip(y, 0, mask.shape[1] - 1)
-    x = np.clip(x, 0, mask.shape[2] - 1)
+    # Check bounds and create valid mask
+    valid = (
+        (mask_row >= 0)
+        & (mask_row < mask.shape[1])
+        & (mask_col >= 0)
+        & (mask_col < mask.shape[2])
+        & (mask_z >= 0)
+        & (mask_z < mask.shape[0])
+    )
 
-    return mask[z, y, x]
+    # Initialize labels array (0 = unassigned)
+    labels = np.zeros(len(puncta_df), dtype=np.int32)
+
+    # Only lookup valid puncta
+    if valid.sum() > 0:
+        labels[valid] = mask[
+            mask_z[valid],
+            mask_row[valid],
+            mask_col[valid],
+        ]
+
+    return labels
 
 
 def build_count_matrix(
     mask_path: Path,
     puncta_paths: list[Path],
+    bbox_dir: Optional[Path] = None,
 ) -> Optional["anndata.AnnData"]:
     """Build a gene x cell AnnData from one clone mask and its puncta CSVs.
 
     Args:
         mask_path: Path to 3D mask TIFF.
         puncta_paths: List of puncta CSV paths (gene parsed from filename).
+        bbox_dir: Directory containing bbox_ref.mat files (for coordinate correction).
+                  If None, raw coordinates are used (no correction).
 
     Returns:
         AnnData with shape (n_cells, n_genes).
@@ -140,6 +235,21 @@ def build_count_matrix(
         logger.warning(f"  No cells found in mask, skipping")
         return None
 
+    # Load bbox offsets if provided
+    row_offset, col_offset, z_scale = 0, 0, 1
+    if bbox_dir is not None:
+        row_offset, col_offset = load_bbox(bbox_dir, brain_id)
+
+        # Detect z_scale from first puncta file
+        if puncta_paths:
+            sample_df = pd.read_csv(puncta_paths[0])
+            max_z = sample_df["z"].max()
+            z_scale = detect_z_scale(mask.shape, max_z)
+            logger.info(
+                f"  Coordinate correction: row_offset={row_offset}, "
+                f"col_offset={col_offset}, z_scale={z_scale}"
+            )
+
     # Map label -> row index
     label_to_idx = {int(lab): i for i, lab in enumerate(meta["label"].values)}
 
@@ -152,7 +262,9 @@ def build_count_matrix(
         genes.append(gene)
 
         puncta_df = pd.read_csv(csv_path)
-        cell_labels = assign_puncta_to_cells(puncta_df, mask)
+        cell_labels = assign_puncta_to_cells(
+            puncta_df, mask, row_offset, col_offset, z_scale
+        )
 
         col = np.zeros(n_cells, dtype=np.int32)
         for label in cell_labels:
@@ -203,6 +315,7 @@ def process_clone(
     mask_path: Path,
     puncta_dir: Path,
     output_dir: Path,
+    bbox_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """Process a single clone: build count matrix and save .h5ad.
 
@@ -210,6 +323,8 @@ def process_clone(
         mask_path: Path to clone mask TIFF.
         puncta_dir: Directory containing puncta CSVs.
         output_dir: Output directory for .h5ad files.
+        bbox_dir: Directory containing bbox_ref.mat files (for coordinate correction).
+                  If None, raw coordinates are used.
 
     Returns:
         Path to saved .h5ad file, or None if no cells.
@@ -226,7 +341,7 @@ def process_clone(
 
     logger.info(f"Found {len(puncta_paths)} puncta CSVs for brain {brain_id}")
 
-    adata = build_count_matrix(mask_path, puncta_paths)
+    adata = build_count_matrix(mask_path, puncta_paths, bbox_dir)
     if adata is None:
         return None
 
