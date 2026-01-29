@@ -46,8 +46,8 @@ except ImportError:
     HAS_TQDM = False
 
 
-# Default rs-fish executable path
-DEFAULT_RSFISH_CMD = "/nfs/turbo/lsa-tzumin/software/rs-fish-2.3.1/bin/rs-fish"
+# Default rs-fish executable path (use 'rs-fish' from PATH, provided by rs-fish module)
+DEFAULT_RSFISH_CMD = "rs-fish"
 
 # Channel name mapping from h5 filenames to threshold CSV column names
 CHANNEL_NAME_MAP = {

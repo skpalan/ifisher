@@ -17,4 +17,15 @@ def __getattr__(name):
             RSFishJob,
         )
         return locals()[name]
+    elif name in ('USeg3DPipeline', 'BoundingBox', 'CloneConfig', 'BrainConfig', 
+                  'PipelineConfig', 'generate_config_template'):
+        from .usegment3d import (
+            USeg3DPipeline,
+            BoundingBox,
+            CloneConfig,
+            BrainConfig,
+            PipelineConfig,
+            generate_config_template,
+        )
+        return locals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

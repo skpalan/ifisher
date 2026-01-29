@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ifish_tools"
+version = "0.1.0"
+description = "Tools and programs for processing iFISH data"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "iFISH Lab"}
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "tifffile",
+    "h5py",
+    "nd2",
+    "tqdm",
+    "cellpose",
+    "scikit-image",
+    "matplotlib",
+    "psutil",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+nd2-processor = "ifish_tools.nd2_processor:main"
+rsfish-runner = "ifish_tools.rsfish_runner:main"
+usegment3d = "ifish_tools.usegment3d.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ifish_tools*"]
