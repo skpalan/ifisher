@@ -104,6 +104,53 @@ def detect_z_scale(mask_shape: Tuple[int, int, int], max_puncta_z: float) -> int
     return z_scale
 
 
+def crop_puncta(
+    puncta_path: Path,
+    mask_shape: Tuple[int, int, int],
+    row_offset: int,
+    col_offset: int,
+    z_scale: int,
+    output_path: Path,
+) -> int:
+    """Crop and transform a puncta CSV to cropped mask coordinates.
+
+    Filters puncta to those within the mask bounding box and transforms
+    coordinates from uncropped (puncta round) to cropped (mask round) space.
+
+    Args:
+        puncta_path: Path to uncropped puncta CSV.
+        mask_shape: Shape of the cropped mask (Z, Y, X).
+        row_offset: 0-based row offset (bbox.xmin - 1).
+        col_offset: 0-based col offset (bbox.ymin - 1).
+        z_scale: Z-axis scaling factor.
+        output_path: Path to save cropped CSV.
+
+    Returns:
+        Number of puncta written.
+    """
+    df = pd.read_csv(puncta_path)
+
+    # Transform to cropped mask coordinates
+    df["y"] = df["y"] - row_offset
+    df["x"] = df["x"] - col_offset
+    df["z"] = df["z"] * z_scale
+
+    # Filter to mask bounds
+    valid = (
+        (df["y"] >= 0)
+        & (df["y"] < mask_shape[1])
+        & (df["x"] >= 0)
+        & (df["x"] < mask_shape[2])
+        & (df["z"] >= 0)
+        & (df["z"] < mask_shape[0])
+    )
+    df_cropped = df.loc[valid, ["x", "y", "z", "intensity"]].copy()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df_cropped.to_csv(output_path, index=False)
+    return len(df_cropped)
+
+
 def compute_cell_metadata(mask: np.ndarray) -> pd.DataFrame:
     """Compute cell centroids and sizes from a 3D label mask.
 
@@ -316,6 +363,7 @@ def process_clone(
     puncta_dir: Path,
     output_dir: Path,
     bbox_dir: Optional[Path] = None,
+    save_puncta_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """Process a single clone: build count matrix and save .h5ad.
 
@@ -325,6 +373,7 @@ def process_clone(
         output_dir: Output directory for .h5ad files.
         bbox_dir: Directory containing bbox_ref.mat files (for coordinate correction).
                   If None, raw coordinates are used.
+        save_puncta_dir: Directory to save cropped puncta CSVs. If None, puncta are not saved.
 
     Returns:
         Path to saved .h5ad file, or None if no cells.
@@ -350,5 +399,21 @@ def process_clone(
     out_path = output_dir / f"brain{brain_id}_clone{clone_id}.h5ad"
     adata.write_h5ad(out_path)
     logger.info(f"Saved: {out_path} ({adata.n_obs} cells x {adata.n_vars} genes)")
+
+    # Optionally save cropped puncta CSVs
+    if save_puncta_dir is not None and bbox_dir is not None:
+        mask = tifffile.imread(mask_path)
+        row_offset, col_offset = load_bbox(bbox_dir, brain_id)
+        sample_df = pd.read_csv(puncta_paths[0])
+        z_scale = detect_z_scale(mask.shape, sample_df["z"].max())
+
+        save_puncta_dir = Path(save_puncta_dir)
+        for csv_path in puncta_paths:
+            gene = extract_gene_from_filename(csv_path.name)
+            out_csv = save_puncta_dir / f"brain{brain_id}_clone{clone_id}_{gene}.csv"
+            n = crop_puncta(
+                csv_path, mask.shape, row_offset, col_offset, z_scale, out_csv
+            )
+            logger.info(f"  Cropped puncta: {out_csv.name} ({n} puncta)")
 
     return out_path
