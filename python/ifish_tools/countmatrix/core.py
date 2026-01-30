@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 def extract_gene_from_filename(filename: str) -> str:
     """Extract gene name from puncta CSV filename.
 
-    Expected pattern: ..._gene-{GENE}.csv
+    Expected pattern: ..._gene-{GENE}.csv or ..._gene-{GENE}_regis.csv
     """
-    m = re.search(r"gene-([^.]+)\.csv", filename)
+    m = re.search(r"gene-([^_.]+)", filename)
     if m is None:
         raise ValueError(f"Cannot extract gene name from filename: {filename}")
     return m.group(1)

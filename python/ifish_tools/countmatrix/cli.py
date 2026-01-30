@@ -38,20 +38,6 @@ Examples:
         help="Output directory for .h5ad files.",
     )
     parser.add_argument(
-        "--bbox-dir",
-        type=Path,
-        required=False,
-        help="Directory containing bbox_ref.mat files (e.g., regis_downsamp_1121/). "
-             "If provided, applies coordinate correction (crop offset + z-scaling).",
-    )
-    parser.add_argument(
-        "--save-puncta",
-        type=Path,
-        required=False,
-        help="Directory to save cropped puncta CSVs (transformed to mask coordinates). "
-             "Requires --bbox-dir to be set.",
-    )
-    parser.add_argument(
         "--mask-pattern",
         type=str,
         default="*_cp_masks.tif",
@@ -84,20 +70,12 @@ def main(argv=None):
     mask_dir = args.mask_dir
     puncta_dir = args.puncta_dir
     output_dir = args.output_dir
-    bbox_dir = args.bbox_dir
-    save_puncta_dir = args.save_puncta
 
     if not mask_dir.is_dir():
         log.error(f"Mask directory not found: {mask_dir}")
         sys.exit(1)
     if not puncta_dir.is_dir():
         log.error(f"Puncta directory not found: {puncta_dir}")
-        sys.exit(1)
-    if bbox_dir is not None and not bbox_dir.is_dir():
-        log.error(f"Bbox directory not found: {bbox_dir}")
-        sys.exit(1)
-    if save_puncta_dir is not None and bbox_dir is None:
-        log.error("--save-puncta requires --bbox-dir to be set")
         sys.exit(1)
 
     mask_paths = sorted(mask_dir.glob(args.mask_pattern))
@@ -107,18 +85,12 @@ def main(argv=None):
 
     log.info(f"Found {len(mask_paths)} clone masks")
     log.info(f"Output directory: {output_dir}")
-    if bbox_dir:
-        log.info(f"Bbox directory: {bbox_dir} (coordinate correction enabled)")
-    else:
-        log.warning("No bbox directory provided - using raw coordinates (may be inaccurate)")
-    if save_puncta_dir:
-        log.info(f"Cropped puncta will be saved to: {save_puncta_dir}")
 
     if args.workers > 1 and len(mask_paths) > 1:
         results = []
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(process_clone, mp, puncta_dir, output_dir, bbox_dir, save_puncta_dir): mp
+                executor.submit(process_clone, mp, puncta_dir, output_dir): mp
                 for mp in mask_paths
             }
             for future in as_completed(futures):
@@ -133,7 +105,7 @@ def main(argv=None):
         results = []
         for mp in mask_paths:
             try:
-                result = process_clone(mp, puncta_dir, output_dir, bbox_dir, save_puncta_dir)
+                result = process_clone(mp, puncta_dir, output_dir)
                 if result:
                     results.append(result)
             except Exception as e:

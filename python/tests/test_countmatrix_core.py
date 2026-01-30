@@ -27,9 +27,9 @@ class TestFilenameExtraction:
         assert extract_gene_from_filename(filename) == "dati"
 
     def test_extract_gene_with_complex_name(self):
-        """Extract gene name with hyphens and underscores."""
+        """Extract gene name with hyphens (stops at underscore/dot)."""
         filename = "data_gene-foo-bar_baz.csv"
-        assert extract_gene_from_filename(filename) == "foo-bar_baz"
+        assert extract_gene_from_filename(filename) == "foo-bar"
 
     def test_extract_gene_raises_on_invalid_filename(self):
         """Raise ValueError if gene pattern not found."""
@@ -237,14 +237,15 @@ class TestBuildCountMatrix:
             tifffile.imwrite(mask_path, mask)
 
             # Create puncta CSVs for two genes
+            # Include some puncta at high z to ensure z_scale=1
             puncta1 = pd.DataFrame(
                 {
-                    "x": [1.0, 1.5],
-                    "y": [1.0, 1.5],
-                    "z": [1.0, 1.5],
-                    "t": [0, 0],
-                    "c": [0, 0],
-                    "intensity": [100, 100],
+                    "x": [1.0, 1.5, 5.0],  # Last one outside cell for z_scale detection
+                    "y": [1.0, 1.5, 5.0],
+                    "z": [1.0, 1.5, 9.0],  # max_z=9 ensures z_scale=1
+                    "t": [0, 0, 0],
+                    "c": [0, 0, 0],
+                    "intensity": [100, 100, 100],
                 }
             )
             csv1 = tmpdir / "data_gene-geneA.csv"
@@ -252,12 +253,12 @@ class TestBuildCountMatrix:
 
             puncta2 = pd.DataFrame(
                 {
-                    "x": [1.0, 1.5, 2.0],
-                    "y": [1.0, 1.5, 2.0],
-                    "z": [1.0, 1.5, 2.0],
-                    "t": [0, 0, 0],
-                    "c": [0, 0, 0],
-                    "intensity": [100, 100, 100],
+                    "x": [1.0, 1.5, 2.0, 5.0],  # Last one outside cell for z_scale detection
+                    "y": [1.0, 1.5, 2.0, 5.0],
+                    "z": [1.0, 1.5, 2.0, 9.0],  # max_z=9 ensures z_scale=1
+                    "t": [0, 0, 0, 0],
+                    "c": [0, 0, 0, 0],
+                    "intensity": [100, 100, 100, 100],
                 }
             )
             csv2 = tmpdir / "data_gene-geneB.csv"
