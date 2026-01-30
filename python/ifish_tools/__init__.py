@@ -31,4 +31,12 @@ def __getattr__(name):
     elif name in ('build_count_matrix', 'process_clone'):
         from .countmatrix import build_count_matrix, process_clone
         return locals()[name]
+    elif name in ('BoxCoords', 'BrainCloneSpec', 'CloneExtractConfig',
+                  'load_bbox_from_mat', 'extract_clone_mask', 'process_brain',
+                  'run_pipeline'):
+        from .cloneextract import (
+            BoxCoords, BrainCloneSpec, CloneExtractConfig,
+            load_bbox_from_mat, extract_clone_mask, process_brain, run_pipeline,
+        )
+        return locals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

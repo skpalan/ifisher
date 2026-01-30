@@ -40,6 +40,7 @@ rsfish-runner = "ifish_tools.rsfish_runner:main"
 usegment3d = "ifish_tools.usegment3d.cli:main"
 count-matrix = "ifish_tools.countmatrix.cli:main"
 count-qc = "ifish_tools.countmatrix.qc_cli:main"
+clone-extract = "ifish_tools.cloneextract.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
