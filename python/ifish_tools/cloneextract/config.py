@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
 
 
 @dataclass
@@ -122,7 +119,15 @@ def load_bbox_from_mat(mat_path: str) -> BoxCoords:
     """
     import scipy.io
 
-    data = scipy.io.loadmat(mat_path)
-    bbox_raw = data["bbox"]
-    coords = [int(bbox_raw[0, 0][i][0, 0]) for i in range(6)]
+    if not Path(mat_path).exists():
+        raise FileNotFoundError(f"Bbox file not found: {mat_path}")
+
+    try:
+        data = scipy.io.loadmat(mat_path)
+        if "bbox" not in data:
+            raise ValueError(f"'bbox' key not found in {mat_path}")
+        bbox_raw = data["bbox"]
+        coords = [int(bbox_raw[0, 0][i][0, 0]) for i in range(6)]
+    except (IndexError, KeyError) as e:
+        raise ValueError(f"Invalid bbox structure in {mat_path}: {e}")
     return BoxCoords.from_matlab(coords)

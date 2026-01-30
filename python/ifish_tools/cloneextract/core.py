@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import tifffile
@@ -230,6 +229,10 @@ def process_brain(
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    mask_path = Path(spec.mask_path)
+    if not mask_path.exists():
+        raise FileNotFoundError(f"Mask file not found: {spec.mask_path}")
 
     print(f"Loading mask: {spec.mask_path}")
     mask = tifffile.imread(spec.mask_path)
