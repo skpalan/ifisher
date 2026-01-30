@@ -1,0 +1,44 @@
+# Clone mask extraction configuration
+output_dir: "/scratch/Gel_1029/matrix_01-29/module_segment_0130/clone_extract/output"
+closing_radius: 5
+date_tag: "0130"
+
+brains:
+  - name: "brain08"
+    mask_path: "/scratch/Gel_1029/segmentation_1212/train_01-11/brains/masks_final_0126/Gel20251024_round00_brain08_intact_cropped_cp_masks.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain08/ref/bbox_ref.mat"
+    clones:
+      clone1: [560, 788, 775, 1210, 71, 420]
+
+  - name: "brain09"
+    mask_path: "/scratch/Gel_1029/segmentation_1212/train_01-11/brains/masks_final_0126/Gel20251024_round00_brain09_intact_cropped_cp_masks.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain09/ref/bbox_ref.mat"
+    clones:
+      clone1: [502, 730, 930, 1370, 94, 468]
+
+  - name: "brain11"
+    mask_path: "/path/to/brain11_mask.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain11/ref/bbox_ref.mat"
+    clones:
+      clone1: [396, 646, 406, 687, 40, 348]
+      clone2: [340, 662, 1068, 1376, 184, 480]
+
+  - name: "brain13"
+    mask_path: "/scratch/Gel_1029/segmentation_1212/train_01-11/brains/masks_final_0126/Gel20251024_round00_brain13_intact_cropped_cp_masks.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain13/ref/bbox_ref.mat"
+    clones:
+      clone1: [404, 622, 530, 873, 78, 397]
+
+  - name: "brain15"
+    mask_path: "/scratch/Gel_1029/segmentation_1212/train_01-11/brains/masks_final_0126/Gel20251024_round00_brain15_intact_cropped_cp_masks.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain15/ref/bbox_ref.mat"
+    clones:
+      clone1: [310, 615, 885, 1245, 122, 430]
+      clone2: [735, 1055, 395, 665, 1, 360]
+
+  - name: "brain16"
+    mask_path: "/path/to/brain16_mask.tif"
+    bbox: "/scratch/Gel_1029/regis_downsamp_1121/brain16/ref/bbox_ref.mat"
+    clones:
+      clone1: [477, 700, 393, 767, 86, 456]
+      clone2: [354, 630, 1070, 1351, 86, 419]
