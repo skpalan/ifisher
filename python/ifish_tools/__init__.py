@@ -28,4 +28,7 @@ def __getattr__(name):
             generate_config_template,
         )
         return locals()[name]
+    elif name in ('build_count_matrix', 'process_clone'):
+        from .countmatrix import build_count_matrix, process_clone
+        return locals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
