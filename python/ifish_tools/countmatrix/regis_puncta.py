@@ -519,9 +519,9 @@ def register_brain(
         # Resize displacement field to cropped size
         D_resized = resize_displacement_field(D, cropped_size)
         
-        # Find puncta CSVs for this round
+        # Find puncta CSVs for this round (search recursively for subdirectory structure)
         puncta_pattern = f"*{round_id}*{brain_id}*.csv"
-        puncta_files = list(Path(puncta_dir).glob(puncta_pattern))
+        puncta_files = list(Path(puncta_dir).rglob(puncta_pattern))
         
         if len(puncta_files) == 0:
             logger.warning(f"No puncta files for {round_id}")
