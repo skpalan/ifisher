@@ -283,19 +283,24 @@ def build_count_matrix(
         return None
 
     # Load bbox offsets if provided
-    row_offset, col_offset, z_scale = 0, 0, 1
+    row_offset, col_offset = 0, 0
     if bbox_dir is not None:
         row_offset, col_offset = load_bbox(bbox_dir, brain_id)
 
-        # Detect z_scale from first puncta file
-        if puncta_paths:
-            sample_df = pd.read_csv(puncta_paths[0])
-            max_z = sample_df["z"].max()
-            z_scale = detect_z_scale(mask.shape, max_z)
-            logger.info(
-                f"  Coordinate correction: row_offset={row_offset}, "
-                f"col_offset={col_offset}, z_scale={z_scale}"
-            )
+    # Always auto-detect z_scale from first puncta file
+    z_scale = 1
+    if puncta_paths:
+        sample_df = pd.read_csv(puncta_paths[0])
+        max_z = sample_df["z"].max()
+        z_scale = detect_z_scale(mask.shape, max_z)
+
+    if bbox_dir is not None:
+        logger.info(
+            f"  Coordinate correction: row_offset={row_offset}, "
+            f"col_offset={col_offset}, z_scale={z_scale}"
+        )
+    else:
+        logger.info(f"  Z-scale auto-detection: z_scale={z_scale}")
 
     # Map label -> row index
     label_to_idx = {int(lab): i for i, lab in enumerate(meta["label"].values)}
