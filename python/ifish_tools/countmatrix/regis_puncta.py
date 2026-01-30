@@ -444,7 +444,7 @@ def register_brain(
         logger.error(f"Missing bbox files for {brain_id}")
         return
     
-    bbox_ref = load_bbox(bbox_ref_path, 'bbox_ref')
+    bbox_ref = load_bbox(bbox_ref_path, 'bbox')
     bbox_reg = load_bbox(bbox_reg_path, 'bbox_reg')
     
     # Find reference H5 to get pixel size
