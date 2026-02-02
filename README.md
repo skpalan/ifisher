@@ -143,7 +143,57 @@ results = pipeline.run(
 - Configurable via YAML
 - Batch processing of multiple brains
 
-### 4. Clone Unrolling
+### 4. Clone Extract
+
+Extract per-clone segmentation masks from whole-brain volumes with morphological closing to fill gaps between cells.
+
+**Command Line:**
+```bash
+# Validate configuration
+clone-extract --config config.yaml --dry-run
+
+# Run with GPU acceleration (recommended)
+ml ifisher cuda/12.9.1
+clone-extract --config config.yaml --gpu
+
+# Override closing radius
+clone-extract --config config.yaml --gpu --closing-radius 8
+
+# CPU with parallel workers
+clone-extract --config config.yaml --workers 10
+```
+
+**YAML Configuration:**
+```yaml
+output_dir: "/path/to/output"
+closing_radius: 5
+date_tag: "0202"
+
+brains:
+  - name: "brain08"
+    mask_path: "/path/to/brain08_cp_masks.tif"
+    bbox: "/path/to/brain08/ref/bbox_ref.mat"
+    clones:
+      clone1: [560, 788, 775, 1210, 71, 420]  # [ymin, ymax, xmin, xmax, zmin, zmax]
+```
+
+**Python API:**
+```python
+from ifish_tools.cloneextract import CloneExtractConfig, run_pipeline
+
+config = CloneExtractConfig.from_yaml("config.yaml")
+output_paths = run_pipeline(config, use_gpu=True)
+```
+
+**Key Features:**
+- GPU-accelerated morphological closing via CuPy
+- Per-label closing with distance-transform overlap resolution
+- Automatic 2x Z resolution detection and scaling
+- Multi-worker brain-level parallelism + threaded label-level closing
+- YAML-driven batch processing
+- zstd-compressed TIFF output
+
+### 5. Clone Unrolling
 
 Transform 3D clones along principal curves for spatial analysis.
 
@@ -187,7 +237,19 @@ ifish_tools/
 │   ├── aggregation.py      # u-Segment3D aggregation
 │   ├── smoothing.py        # Label diffusion smoothing
 │   └── utils.py            # Utility functions
-└── unroll/                 # Clone unrolling
+├── cloneextract/          # Clone mask extraction
+│   ├── __init__.py
+│   ├── cli.py             # Command-line interface
+│   ├── config.py          # Configuration & YAML parsing
+│   └── core.py            # Extraction & morphological closing (CPU/GPU)
+├── countmatrix/           # Gene-by-cell count matrices
+│   ├── __init__.py
+│   ├── cli.py             # count-matrix CLI
+│   ├── qc_cli.py          # count-qc CLI
+│   ├── core.py            # Matrix assembly
+│   ├── regis_puncta.py    # Registered puncta lookup
+│   └── qc.py              # Quality-control metrics
+└── unroll/                # Clone unrolling
     ├── __init__.py
     ├── principal_curve.py  # Principal curve fitting
     ├── transform.py        # Coordinate transformations
