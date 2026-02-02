@@ -363,6 +363,7 @@ class ChannelTask:
     z_step: float
     overwrite: bool
     compression: str = 'gzip-1'
+    rescale: bool = True
 
 
 def _process_channel_task(task: ChannelTask) -> dict:
@@ -380,7 +381,11 @@ def _process_channel_task(task: ChannelTask) -> dict:
         if out_path.exists() and not task.overwrite:
             results['skipped'].append(str(out_path))
         else:
-            data_16bit, max_val = _normalize_to_16bit(channel_data)
+            if task.rescale:
+                data_16bit, max_val = _normalize_to_16bit(channel_data)
+            else:
+                max_val = float(np.max(channel_data))
+                data_16bit = np.clip(channel_data, 0, 65535).astype(np.uint16)
             _save_h5(data_16bit, out_path, max_val, task.element_size_um, task.metadata, channel_name, task.compression)
             results['processed'].append(str(out_path))
     
@@ -400,7 +405,10 @@ def _process_channel_task(task: ChannelTask) -> dict:
         if out_path.exists() and not task.overwrite:
             results['skipped'].append(str(out_path))
         else:
-            data_16bit, _ = _normalize_to_16bit(channel_data)
+            if task.rescale:
+                data_16bit, _ = _normalize_to_16bit(channel_data)
+            else:
+                data_16bit = np.clip(channel_data, 0, 65535).astype(np.uint16)
             _save_tiff(data_16bit, out_path, task.pixel_size_um, task.z_step)
             results['processed'].append(str(out_path))
     
@@ -428,6 +436,7 @@ def process_nd2_to_h5(
     overwrite: bool = False,
     channel_workers: int = 1,
     compression: str = 'gzip-1',
+    rescale: bool = True,
     progress_callback: Optional[callable] = None,
 ) -> dict[str, list[str]]:
     """
@@ -583,6 +592,7 @@ def process_nd2_to_h5(
             z_step=z_step,
             overwrite=overwrite,
             compression=compression,
+            rescale=rescale,
         ))
     
     results = {'processed': [], 'skipped': []}
@@ -618,13 +628,13 @@ def process_nd2_to_h5(
 
 def _process_single_file_wrapper(args: tuple) -> dict:
     """Worker function for parallel file processing."""
-    (nd2_path, output_dir, z_step, h5_16bit, h5_8bit, tiff_16bit, tiff_8bit, 
-     overwrite, channel_workers, compression) = args
+    (nd2_path, output_dir, z_step, h5_16bit, h5_8bit, tiff_16bit, tiff_8bit,
+     overwrite, channel_workers, compression, rescale) = args
     try:
         return process_nd2_to_h5(
             nd2_path, output_dir, z_step,
             h5_16bit, h5_8bit, tiff_16bit, tiff_8bit,
-            overwrite, channel_workers, compression
+            overwrite, channel_workers, compression, rescale
         )
     except Exception as e:
         _safe_print(f"Error processing {nd2_path}: {e}")
@@ -645,6 +655,7 @@ def process_nd2_folder(
     compression: str = 'gzip-1',
     max_memory: Optional[str] = None,
     overwrite: bool = False,
+    rescale: bool = True,
 ) -> dict[str, int]:
     """
     Batch process all ND2 files in a folder structure.
@@ -760,12 +771,13 @@ def process_nd2_folder(
         print(f"           Consider reducing --workers or --channel-workers.")
     
     print(f"\nCompression: {compression}")
+    print(f"Rescale 16-bit: {rescale}")
     print(f"{'='*60}\n")
     
     # Prepare task arguments
     task_args = [
-        (nd2_path, output_dir, z_step, h5_16bit, h5_8bit, tiff_16bit, tiff_8bit, 
-         overwrite, channel_workers, compression)
+        (nd2_path, output_dir, z_step, h5_16bit, h5_8bit, tiff_16bit, tiff_8bit,
+         overwrite, channel_workers, compression, rescale)
         for nd2_path, z_step in nd2_files
     ]
     
@@ -888,6 +900,8 @@ Examples:
                         choices=['gzip-4', 'gzip-1', 'lzf', 'none'],
                         help='H5 compression type. Default: gzip-1. Options: gzip-4 (slow, small), gzip-1 (balanced), lzf (fast, larger), none (fastest, largest)')
     
+    parser.add_argument('--rescale', action=argparse.BooleanOptionalAction, default=True,
+                        help='Rescale 16-bit data to full range (default: True). Use --no-rescale to save raw values.')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing files')
     
@@ -912,6 +926,7 @@ Examples:
             overwrite=args.overwrite,
             channel_workers=channel_workers,
             compression=args.compression,
+            rescale=args.rescale,
         )
         print(f"Processed: {len(result['processed'])}, Skipped: {len(result['skipped'])}")
         
@@ -931,6 +946,7 @@ Examples:
             compression=args.compression,
             max_memory=args.max_memory,
             overwrite=args.overwrite,
+            rescale=args.rescale,
         )
     else:
         print(f"Error: {input_path} is not a valid ND2 file or directory")
