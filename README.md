@@ -52,21 +52,30 @@ nd2-processor input.nd2 output_dir/ \
 
 **Python API:**
 ```python
-from ifish_tools.nd2_processor import process_nd2_to_h5
+from ifish_tools.nd2_processor import process_nd2_to_h5, process_nd2_folder
 
+# Single file
 process_nd2_to_h5(
     nd2_path="data/brain01.nd2",
     output_dir="output/",
-    rounds_16bit=["round00", "round01"],
-    workers=20
+    h5_16bit=["round00", "round01"],
+    compression="gzip-4",
+)
+
+# Batch folder
+process_nd2_folder(
+    nd2_folder="raw_data/",
+    output_dir="output/",
+    h5_16bit=["round00", "round01"],
+    workers=20,
 )
 ```
 
 **Key Features:**
-- Parallel processing with configurable workers
+- Parallel processing with configurable file and channel workers
 - Multiple output formats (HDF5 16/8-bit, TIFF 16/8-bit)
 - Automatic channel detection
-- Memory-efficient processing
+- Configurable memory limit
 - Progress tracking with tqdm
 
 ### 2. RS-FISH Runner
@@ -86,15 +95,29 @@ rsfish-runner \
 
 **Python API:**
 ```python
-from ifish_tools.rsfish_runner import run_rsfish_batch
+from ifish_tools.rsfish_runner import (
+    load_brain_timepoint_mapping,
+    load_threshold_table,
+    find_files_to_process,
+    run_rsfish_batch,
+)
 
-results = run_rsfish_batch(
+# Build job list
+brain_tp = load_brain_timepoint_mapping("nd2_metadata.csv")
+thresholds = load_threshold_table("threshold_table.csv")
+jobs = find_files_to_process(
     data_dir="/path/to/h5_files",
-    metadata_csv="nd2_metadata.csv",
-    threshold_csv="threshold_table.csv",
+    brain_timepoints=brain_tp,
+    thresholds=thresholds,
     output_dir="/path/to/output",
+)
+
+# Run batch
+results = run_rsfish_batch(
+    jobs=jobs,
+    output_dir="/path/to/output",
+    max_workers=20,
     sigma=1.3,
-    workers=20
 )
 ```
 
@@ -195,30 +218,79 @@ output_paths = run_pipeline(config, use_gpu=True)
 
 ### 5. Clone Unrolling
 
-Transform 3D clones along principal curves for spatial analysis.
+Unroll 3D tissue clones along their principal curve using [ElPiGraph](https://github.com/j-bac/elpigraph-python) elastic principal curves and TopoVelo-style spherical coordinate transformation. Automatically detects the neuroblast (largest cell) as the starting endpoint.
+
+**Command Line:**
+```bash
+unroll \
+  --mask-dir masks/ \
+  --puncta-dir puncta/pixel/ \
+  --output-dir output/ \
+  --n-anchors 30 \
+  --plane zx
+```
+
+**Key Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mask-dir` | (required) | Directory with 3D mask TIFFs |
+| `--puncta-dir` | (required) | Directory with puncta CSVs (x,y,z columns) |
+| `--output-dir` | (required) | Output directory |
+| `--n-anchors` | 30 | Number of anchor points on the principal curve |
+| `--plane` | zx | Unrolling plane (`xy`, `yz`, or `zx`) |
+| `--padding` | 50 | Padding around unrolled mask in voxels |
+| `--epg-mu` | 1.0 | ElPiGraph stretching penalty |
+| `--epg-lambda` | 0.01 | ElPiGraph bending penalty |
+| `--mask-pattern` | *.tif | Glob pattern for mask files |
+
+**Output structure:**
+```
+output_dir/brain{ID}_clone{N}/
+  unrolled_mask.tif      # Transformed 3D mask
+  transform.json         # Transformation parameters
+  qc_plot.png            # QC plot (centroids + mask voxels, before/after)
+  puncta/*.csv           # Transformed puncta per round
+```
 
 **Python API:**
 ```python
 from ifish_tools.unroll import (
     compute_centroids,
     fit_principal_curve,
+    sort_anchors,
     unroll_clone,
-    transform_mask
+    transform_mask,
+    detect_endpoints,
+    find_endpoint_anchors,
+)
+from ifish_tools.unroll.io import load_mask
+
+# Load mask and compute centroids
+mask = load_mask("mask.tif")
+centroids = compute_centroids(mask)
+
+# Detect endpoints (neuroblast = largest cell)
+start_cell, end_cell = detect_endpoints(mask, centroids)
+
+# Fit elastic principal curve
+anchor_pos, edges, node_degree, assignments = fit_principal_curve(
+    centroids, n_anchors=30
 )
 
-# Compute principal curve through cell centroids
-centroids = compute_centroids(mask_3d)
-anchors, tangents = fit_principal_curve(centroids, n_anchors=50)
+# Sort anchors from start to end
+start_anchor, end_anchor = find_endpoint_anchors(
+    anchor_pos, node_degree, centroids[start_cell], centroids[end_cell]
+)
+anchors_ordered = sort_anchors(edges, start_anchor, end_anchor)
 
-# Unroll the clone
-unrolled_coords = unroll_clone(
-    coords=cell_coords,
-    anchors=anchors,
-    tangents=tangents
+# Unroll centroids (spherical) and get rigid transforms for masks
+new_centroids, transform_params = unroll_clone(
+    centroids, anchors_ordered, anchor_pos, assignments, start_cell, plane="zx"
 )
 
-# Transform the mask
-unrolled_mask = transform_mask(mask_3d, anchors, tangents)
+# Transform mask (rigid rotation per cell)
+unrolled_mask = transform_mask(mask, transform_params, padding=50)
 ```
 
 ## Module Structure
@@ -251,9 +323,12 @@ ifish_tools/
 │   └── qc.py              # Quality-control metrics
 └── unroll/                # Clone unrolling
     ├── __init__.py
-    ├── principal_curve.py  # Principal curve fitting
-    ├── transform.py        # Coordinate transformations
-    └── io.py              # I/O utilities
+    ├── __main__.py         # python -m entry point
+    ├── cli.py              # Command-line interface + QC plots
+    ├── endpoints.py        # Auto endpoint detection
+    ├── principal_curve.py  # ElPiGraph principal curve fitting
+    ├── transform.py        # Spherical unrolling + rigid rotation
+    └── io.py               # I/O utilities
 ```
 
 ## Dependencies
@@ -268,6 +343,9 @@ ifish_tools/
 - torch ≥ 2.0
 - cellpose ≥ 3.1
 - u-Segment3D 0.1.4
+
+### Curve Fitting
+- elpigraph-python
 
 ### Image Processing
 - scikit-image
@@ -321,6 +399,9 @@ rsfish-runner \
 usegment3d --generate-config segmentation_config.yaml
 # Edit config file as needed
 usegment3d --config segmentation_config.yaml --gpus 0,1
+
+# 5. Unroll clones along principal curves
+unroll --mask-dir masks/ --puncta-dir output/puncta/ --output-dir output/unrolled/
 ```
 
 ### Python Scripting Example
@@ -343,12 +424,8 @@ process_nd2_folder(
 pipeline = USeg3DPipeline.from_yaml('config.yaml')
 results = pipeline.run(gpus=[0])
 
-# 3. Unroll clones for analysis
-for brain, result in results.items():
-    mask = result['segmentation']
-    centroids = compute_centroids(mask)
-    anchors, tangents = fit_principal_curve(centroids)
-    unrolled = unroll_clone(centroids, anchors, tangents)
+# 3. Unroll clones
+# See "Clone Unrolling" section above for Python API usage
 ```
 
 ## Citation
