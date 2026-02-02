@@ -40,8 +40,8 @@ Examples:
     parser.add_argument(
         "--puncta-dir",
         type=str,
-        required=True,
-        help="Directory containing puncta CSV files (x,y,z columns)",
+        default=None,
+        help="Directory containing puncta CSV files (x,y,z columns). Optional.",
     )
     parser.add_argument(
         "--output-dir",
@@ -255,7 +255,7 @@ def plot_qc(
 
 def process_one_mask(
     mask_path: Path,
-    puncta_dir: Path,
+    puncta_dir: Path | None,
     output_dir: Path,
     n_anchors: int,
     plane: str,
@@ -336,6 +336,11 @@ def process_one_mask(
     )
 
     # 8. Transform matching puncta
+    if puncta_dir is None:
+        logger.info("  No puncta dir provided, skipping puncta transformation")
+        logger.info("  Done: %s", sample_name)
+        return
+
     puncta_files = find_matching_puncta(puncta_dir, brain_id)
     if not puncta_files:
         logger.warning("  No puncta files found for brain%s", brain_id)
@@ -383,7 +388,7 @@ def main(argv=None):
     )
 
     mask_dir = Path(args.mask_dir)
-    puncta_dir = Path(args.puncta_dir)
+    puncta_dir = Path(args.puncta_dir) if args.puncta_dir else None
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
