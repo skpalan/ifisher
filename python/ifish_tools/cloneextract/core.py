@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,14 @@ from skimage.morphology import ball
 from tqdm import tqdm
 
 from .config import BoxCoords, BrainCloneSpec, CloneExtractConfig, load_bbox_from_mat
+
+try:
+    import cupy as cp
+    from cupyx.scipy.ndimage import binary_closing as gpu_binary_closing
+    from cupyx.scipy.ndimage import distance_transform_edt as gpu_distance_transform_edt
+    HAS_GPU = True
+except (ImportError, Exception):
+    HAS_GPU = False
 
 
 def detect_mask_space(mask: np.ndarray, bbox: BoxCoords) -> str:
@@ -37,9 +47,15 @@ def detect_mask_space(mask: np.ndarray, bbox: BoxCoords) -> str:
     mask_shape = mask.shape
     bbox_shape = bbox.shape()
 
+    # Exact match in all dimensions
     if mask_shape == bbox_shape:
         return "bbox"
 
+    # Check if Y and X dimensions match bbox (hybrid case: bbox-cropped in Y/X, different Z resolution)
+    if mask_shape[1] == bbox_shape[1] and mask_shape[2] == bbox_shape[2]:
+        return "bbox"
+
+    # Whole-brain: mask is larger than bbox in all dimensions
     if (mask_shape[0] >= bbox.zmax and
         mask_shape[1] >= bbox.ymax and
         mask_shape[2] >= bbox.xmax):
@@ -95,7 +111,7 @@ def compute_relative_cbox(cbox: BoxCoords, bbox: BoxCoords) -> BoxCoords:
 
 
 def _resolve_overlaps(new_claims: dict, raw_seg: np.ndarray) -> np.ndarray:
-    """Resolve overlapping closure claims via distance transform."""
+    """Resolve overlapping closure claims via distance transform (CPU)."""
     result = raw_seg.copy()
 
     total_claims = np.zeros_like(raw_seg, dtype=np.int32)
@@ -134,7 +150,100 @@ def _resolve_overlaps(new_claims: dict, raw_seg: np.ndarray) -> np.ndarray:
     return result
 
 
-def apply_morphological_closing(mask: np.ndarray, radius: int = 5) -> np.ndarray:
+def _resolve_overlaps_gpu(new_claims: dict, raw_seg) -> np.ndarray:
+    """Resolve overlapping closure claims via distance transform (GPU).
+
+    All inputs/outputs are CuPy arrays on GPU. Returns a NumPy array.
+    Uses a streaming min-distance approach to avoid allocating a full
+    (N_labels x Z x Y x X) stack that can exceed GPU memory.
+    """
+    result = raw_seg.copy()
+    labels = list(new_claims.keys())
+
+    total_claims = cp.zeros_like(raw_seg, dtype=cp.int32)
+    for mask in new_claims.values():
+        total_claims += mask.astype(cp.int32)
+
+    disputed = total_claims > 1
+
+    if not disputed.any():
+        for label, mask in new_claims.items():
+            result[mask] = label
+        return cp.asnumpy(result)
+
+    # Assign undisputed claims first
+    undisputed = total_claims == 1
+    for label, mask in new_claims.items():
+        result[mask & undisputed] = label
+
+    # For disputed voxels: stream through labels, track running min distance
+    best_dist = cp.full(raw_seg.shape, cp.inf, dtype=cp.float32)
+    best_label = cp.zeros(raw_seg.shape, dtype=raw_seg.dtype)
+
+    for label in tqdm(labels, desc="Distance transforms (GPU)", leave=False):
+        dt = gpu_distance_transform_edt(~(raw_seg == label)).astype(cp.float32)
+        claim = new_claims[label]
+        # Only consider where this label actually claims AND is disputed
+        update_mask = claim & disputed & (dt < best_dist)
+        best_dist[update_mask] = dt[update_mask]
+        best_label[update_mask] = label
+        del dt
+
+    result[disputed] = best_label[disputed]
+    del best_dist, best_label
+
+    return cp.asnumpy(result)
+
+
+def apply_morphological_closing_gpu(
+    mask: np.ndarray, radius: int = 5, device: int = 0,
+) -> np.ndarray:
+    """GPU-accelerated per-label morphological closing with overlap resolution.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        3D segmentation mask (Z, Y, X), integer labels (NumPy on CPU).
+    radius : int
+        Ball radius for structuring element. 0 = no-op.
+    device : int
+        CUDA device index.
+
+    Returns
+    -------
+    np.ndarray
+        Closed segmentation mask (NumPy on CPU).
+    """
+    if radius <= 0:
+        return mask.copy()
+
+    labels_np = np.unique(mask)
+    labels_np = labels_np[labels_np > 0]
+    if len(labels_np) == 0:
+        return mask.copy()
+
+    with cp.cuda.Device(device):
+        struct_gpu = cp.array(ball(radius))
+        mask_gpu = cp.array(mask)
+        background = mask_gpu == 0
+
+        new_claims = {}
+        for label in tqdm(labels_np, desc=f"Closing (r={radius}, GPU)", leave=False):
+            binary_mask = mask_gpu == label
+            closed = gpu_binary_closing(binary_mask, structure=struct_gpu)
+            newly_claimed = closed & background
+            if newly_claimed.any():
+                new_claims[int(label)] = newly_claimed
+
+        if not new_claims:
+            return mask.copy()
+
+        return _resolve_overlaps_gpu(new_claims, mask_gpu)
+
+
+def apply_morphological_closing(
+    mask: np.ndarray, radius: int = 5, max_threads: int = 1,
+) -> np.ndarray:
     """Apply per-label morphological closing with overlap resolution.
 
     Parameters
@@ -143,6 +252,9 @@ def apply_morphological_closing(mask: np.ndarray, radius: int = 5) -> np.ndarray
         3D segmentation mask (Z, Y, X), integer labels.
     radius : int
         Ball radius for structuring element. 0 = no-op.
+    max_threads : int
+        Number of threads for parallel label closing. scipy binary_closing
+        releases the GIL, so threads provide real speedup without memory copies.
 
     Returns
     -------
@@ -159,13 +271,30 @@ def apply_morphological_closing(mask: np.ndarray, radius: int = 5) -> np.ndarray
     if len(labels) == 0:
         return mask.copy()
 
-    new_claims = {}
-    for label in tqdm(labels, desc=f"Closing (r={radius})", leave=False):
+    background = mask == 0
+
+    def _close_one(label):
         binary_mask = mask == label
         closed = binary_closing(binary_mask, structure=struct)
-        newly_claimed = closed & (mask == 0)
+        newly_claimed = closed & background
         if newly_claimed.any():
-            new_claims[label] = newly_claimed
+            return (label, newly_claimed)
+        return None
+
+    new_claims = {}
+    if max_threads <= 1:
+        for label in tqdm(labels, desc=f"Closing (r={radius})", leave=False):
+            result = _close_one(label)
+            if result is not None:
+                new_claims[result[0]] = result[1]
+    else:
+        with ThreadPoolExecutor(max_workers=max_threads) as pool:
+            futures = {pool.submit(_close_one, l): l for l in labels}
+            for f in tqdm(as_completed(futures), total=len(labels),
+                          desc=f"Closing (r={radius})", leave=False):
+                result = f.result()
+                if result is not None:
+                    new_claims[result[0]] = result[1]
 
     if not new_claims:
         return mask.copy()
@@ -179,7 +308,9 @@ def extract_clone_mask(
     bbox: BoxCoords,
     mask_space: str,
     closing_radius: int = 5,
-) -> np.ndarray:
+    max_threads: int = 1,
+    use_gpu: bool = False,
+) -> tuple[np.ndarray, dict]:
     """Extract a single clone mask in B-box dimensions.
 
     Parameters
@@ -197,8 +328,9 @@ def extract_clone_mask(
 
     Returns
     -------
-    np.ndarray
-        B-box-sized mask with clone region populated.
+    tuple[np.ndarray, dict]
+        B-box-sized mask with clone region populated, and stats dict
+        with keys "n_labels" and "n_voxels" computed on the small crop.
     """
     if mask_space == "whole_brain":
         clone_crop = mask[cbox.to_slices()].copy()
@@ -208,12 +340,25 @@ def extract_clone_mask(
         clone_crop = mask[rel_cbox.to_slices()].copy()
 
     if closing_radius > 0:
-        clone_crop = apply_morphological_closing(clone_crop, radius=closing_radius)
+        if use_gpu and HAS_GPU:
+            clone_crop = apply_morphological_closing_gpu(
+                clone_crop, radius=closing_radius,
+            )
+        else:
+            clone_crop = apply_morphological_closing(
+                clone_crop, radius=closing_radius, max_threads=max_threads,
+            )
+
+    # Compute stats on the small crop before embedding into full output
+    stats = {
+        "n_labels": len(np.unique(clone_crop)) - (1 if 0 in clone_crop else 0),
+        "n_voxels": int(np.count_nonzero(clone_crop)),
+    }
 
     output = np.zeros(bbox.shape(), dtype=mask.dtype)
     output[rel_cbox.to_slices()] = clone_crop
 
-    return output
+    return output, stats
 
 
 def process_brain(
@@ -222,6 +367,8 @@ def process_brain(
     closing_radius: int = 5,
     date_tag: str = "0129",
     naming_template: str = "{brain_base}_{clone_name}_useg_{date}_cp_masks.tif",
+    max_threads: int = 1,
+    use_gpu: bool = False,
 ) -> list[str]:
     """Process all clones for a single brain.
 
@@ -241,6 +388,14 @@ def process_brain(
     mask_space = detect_mask_space(mask, spec.bbox)
     print(f"  Detected mask space: {mask_space}")
 
+    # Handle 2x Z resolution: if mask Z is ~2x B-box Z, scale B-box Z coordinates
+    bbox_shape = spec.bbox.shape()
+    z_ratio = mask.shape[0] / bbox_shape[0]
+    if 1.9 <= z_ratio <= 2.1:  # Allow for small rounding differences
+        print(f"  Detected 2x Z resolution (ratio={z_ratio:.2f}): scaling B-box Z from {bbox_shape[0]} to match mask Z={mask.shape[0]}")
+        spec.bbox.zmin *= 2
+        spec.bbox.zmax = min(spec.bbox.zmax * 2, mask.shape[0])
+
     stem = Path(spec.mask_path).stem
     brain_base = stem[:-len("_cp_masks")] if stem.endswith("_cp_masks") else stem
 
@@ -249,14 +404,16 @@ def process_brain(
         print(f"\n  Processing {clone_name}...")
         t0 = time.time()
 
-        result = extract_clone_mask(
+        result, stats = extract_clone_mask(
             mask, cbox, spec.bbox,
             mask_space=mask_space,
             closing_radius=closing_radius,
+            max_threads=max_threads,
+            use_gpu=use_gpu,
         )
 
-        n_labels = len(np.unique(result)) - 1
-        n_voxels = int(np.sum(result > 0))
+        n_labels = stats["n_labels"]
+        n_voxels = stats["n_voxels"]
         elapsed = time.time() - t0
         print(f"    Cells: {n_labels}, Labeled voxels: {n_voxels}, Time: {elapsed:.1f}s")
 
@@ -266,23 +423,59 @@ def process_brain(
             date=date_tag,
         )
         out_path = str(out_dir / filename)
-        tifffile.imwrite(out_path, result.astype(np.uint16), compression="zlib")
+        tifffile.imwrite(out_path, result.astype(np.uint16), compression="zstd")
         print(f"    Saved: {filename}")
         output_paths.append(out_path)
 
     return output_paths
 
 
-def run_pipeline(config: CloneExtractConfig) -> list[str]:
-    """Run the full clone extraction pipeline."""
-    all_paths = []
-    for spec in config.brains:
-        paths = process_brain(
-            spec,
-            output_dir=config.output_dir,
-            closing_radius=config.closing_radius,
-            date_tag=config.date_tag,
-            naming_template=config.naming_template,
-        )
-        all_paths.extend(paths)
+def run_pipeline(config: CloneExtractConfig, workers: int = 1, use_gpu: bool = False) -> list[str]:
+    """Run the full clone extraction pipeline.
+
+    Parameters
+    ----------
+    config : CloneExtractConfig
+        Pipeline configuration.
+    workers : int
+        Number of parallel brain workers. Each worker also uses threads
+        internally for label-level closing parallelism.
+    use_gpu : bool
+        Use GPU-accelerated morphological closing via CuPy.
+    """
+    if use_gpu and not HAS_GPU:
+        print("WARNING: --gpu requested but CuPy is not available. Falling back to CPU.")
+        use_gpu = False
+
+    max_threads = max(1, os.cpu_count() // max(workers, 1))
+    max_threads = min(max_threads, 8)
+
+    common_kwargs = dict(
+        output_dir=config.output_dir,
+        closing_radius=config.closing_radius,
+        date_tag=config.date_tag,
+        naming_template=config.naming_template,
+        max_threads=max_threads,
+        use_gpu=use_gpu,
+    )
+
+    all_paths: list[str] = []
+    if workers <= 1:
+        for spec in config.brains:
+            paths = process_brain(spec, **common_kwargs)
+            all_paths.extend(paths)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(process_brain, spec, **common_kwargs): spec.brain_name
+                for spec in config.brains
+            }
+            for f in as_completed(futures):
+                brain_name = futures[f]
+                try:
+                    all_paths.extend(f.result())
+                except Exception as exc:
+                    print(f"Brain {brain_name} failed: {exc}")
+                    raise
+
     return all_paths

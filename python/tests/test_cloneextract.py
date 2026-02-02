@@ -127,7 +127,7 @@ class TestExtractCloneMask:
         cbox = BoxCoords.from_python([8, 25, 8, 25, 8, 25])
         bbox = BoxCoords.from_python([5, 40, 5, 40, 5, 40])
 
-        result = extract_clone_mask(
+        result, stats = extract_clone_mask(
             whole_mask, cbox, bbox, mask_space="whole_brain",
             closing_radius=0
         )
@@ -135,6 +135,8 @@ class TestExtractCloneMask:
         # cell at whole (10,10,10) → bbox-relative (5,5,5)
         assert result[5, 5, 5] == 1
         assert result[0, 0, 0] == 0
+        assert stats["n_labels"] >= 1
+        assert stats["n_voxels"] > 0
 
     def test_bbox_sized_input(self):
         """When mask is already bbox-sized."""
@@ -143,9 +145,11 @@ class TestExtractCloneMask:
         bbox_mask[10, 10, 10] = 5
 
         cbox = BoxCoords.from_python([105, 150, 105, 150, 15, 50])
-        result = extract_clone_mask(
+        result, stats = extract_clone_mask(
             bbox_mask, cbox, bbox, mask_space="bbox",
             closing_radius=0
         )
         assert result.shape == bbox.shape()
         assert result[10, 10, 10] == 5
+        assert stats["n_labels"] == 1
+        assert stats["n_voxels"] == 1

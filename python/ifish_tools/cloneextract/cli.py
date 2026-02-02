@@ -11,6 +11,10 @@ def main():
     parser.add_argument("--closing-radius", type=int, default=None,
                         help="Override closing radius (default: from config or 5).")
     parser.add_argument("--output-dir", default=None, help="Override output directory.")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel brain workers (default: 1, sequential).")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Use GPU-accelerated morphological closing (requires CuPy + CUDA).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate and print plan without processing.")
     args = parser.parse_args()
@@ -37,7 +41,7 @@ def main():
                 print(f"  Clone {cname}: shape (Z,Y,X) = {cbox.shape()}")
         return
 
-    paths = run_pipeline(config)
+    paths = run_pipeline(config, workers=args.workers, use_gpu=args.gpu)
     print(f"\nDone. {len(paths)} files written.")
 
 
