@@ -222,12 +222,20 @@ Unroll 3D tissue clones along their principal curve using [ElPiGraph](https://gi
 
 **Command Line:**
 ```bash
+# Basic usage
 unroll \
   --mask-dir masks/ \
   --puncta-dir puncta/pixel/ \
   --output-dir output/ \
   --n-anchors 30 \
   --plane zx
+
+# GPU-accelerated with parallel workers (recommended)
+ml cuda/12.9.1 ifisher
+unroll \
+  --mask-dir masks/ \
+  --output-dir output/ \
+  --gpu --workers 4
 ```
 
 **Key Options:**
@@ -235,7 +243,7 @@ unroll \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--mask-dir` | (required) | Directory with 3D mask TIFFs |
-| `--puncta-dir` | (required) | Directory with puncta CSVs (x,y,z columns) |
+| `--puncta-dir` | (optional) | Directory with puncta CSVs (x,y,z columns) |
 | `--output-dir` | (required) | Output directory |
 | `--n-anchors` | 30 | Number of anchor points on the principal curve |
 | `--plane` | zx | Unrolling plane (`xy`, `yz`, or `zx`) |
@@ -243,6 +251,20 @@ unroll \
 | `--epg-mu` | 1.0 | ElPiGraph stretching penalty |
 | `--epg-lambda` | 0.01 | ElPiGraph bending penalty |
 | `--mask-pattern` | *.tif | Glob pattern for mask files |
+| `--gpu` | auto | Enable GPU acceleration (auto-detects CuPy) |
+| `--no-gpu` | - | Force CPU-only processing |
+| `--device` | 0 | GPU device ID |
+| `--workers`, `-j` | 1 | Number of parallel workers for multi-mask processing |
+
+**GPU Acceleration:**
+- Requires CUDA module: `ml cuda/12.9.1`
+- Uses CuPy for vectorized mask transformation (~10-50x speedup for transform step)
+- Auto-detects GPU availability; falls back to CPU if unavailable
+
+**Parallel Processing:**
+- Use `--workers N` to process multiple masks concurrently
+- I/O-bound workload benefits from threading (overlaps file loading with computation)
+- ~2-3x speedup with 3-4 workers
 
 **Output structure:**
 ```
@@ -290,7 +312,11 @@ new_centroids, transform_params = unroll_clone(
 )
 
 # Transform mask (rigid rotation per cell)
-unrolled_mask = transform_mask(mask, transform_params, padding=50)
+# CPU version
+unrolled_mask, offset = transform_mask(mask, transform_params, padding=50)
+
+# GPU-accelerated version
+unrolled_mask, offset = transform_mask(mask, transform_params, padding=50, use_gpu=True)
 ```
 
 ## Module Structure
@@ -346,6 +372,9 @@ ifish_tools/
 
 ### Curve Fitting
 - elpigraph-python
+
+### GPU Acceleration (Optional)
+- cupy-cuda12x (for GPU-accelerated unrolling)
 
 ### Image Processing
 - scikit-image

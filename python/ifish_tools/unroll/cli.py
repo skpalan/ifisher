@@ -86,6 +86,31 @@ Examples:
         default="*.tif",
         help="Glob pattern for mask files (default: *.tif)",
     )
+    parser.add_argument(
+        "--gpu",
+        dest="use_gpu",
+        action="store_true",
+        default=None,
+        help="Use GPU acceleration (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--no-gpu",
+        dest="use_gpu",
+        action="store_false",
+        help="Disable GPU acceleration",
+    )
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=0,
+        help="GPU device ID (default: 0)",
+    )
+    parser.add_argument(
+        "--workers", "-j",
+        type=int,
+        default=1,
+        help="Number of parallel workers for processing masks (default: 1)",
+    )
     return parser.parse_args(argv)
 
 
@@ -262,6 +287,8 @@ def process_one_mask(
     padding: int,
     epg_mu: float,
     epg_lambda: float,
+    use_gpu: bool = False,
+    device: int = 0,
 ):
     """Process a single mask file: unroll mask and transform matching puncta."""
     brain_id, clone_id = extract_brain_clone_id(mask_path.name)
@@ -315,9 +342,9 @@ def process_one_mask(
     )
 
     # 6. Transform mask
-    logger.info("  Transforming mask")
+    logger.info("  Transforming mask%s", " (GPU)" if use_gpu else "")
     transformed_mask, output_offset = transform_mask(
-        mask, transform_params, padding=padding
+        mask, transform_params, padding=padding, use_gpu=use_gpu, device=device
     )
     save_mask(transformed_mask, sample_dir / "unrolled_mask.tif")
     logger.info("  Saved unrolled mask: %s", transformed_mask.shape)
@@ -357,7 +384,7 @@ def process_one_mask(
         points_zyx = df[["z", "y", "x"]].values
 
         transformed_pts, cell_ids = apply_transform_to_points(
-            points_zyx, mask, transform_params
+            points_zyx, mask, transform_params, use_gpu=use_gpu, device=device
         )
 
         # Drop puncta outside any cell
@@ -392,6 +419,19 @@ def main(argv=None):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # GPU auto-detection
+    from .transform import HAS_GPU
+    if args.use_gpu is None:
+        use_gpu = HAS_GPU
+    else:
+        use_gpu = args.use_gpu
+
+    if use_gpu and not HAS_GPU:
+        logger.warning("GPU requested but CuPy not available, falling back to CPU")
+        use_gpu = False
+
+    logger.info("GPU acceleration: %s", "enabled" if use_gpu else "disabled")
+
     mask_files = sorted(mask_dir.glob(args.mask_pattern))
     if not mask_files:
         logger.error("No mask files found in %s with pattern %s", mask_dir, args.mask_pattern)
@@ -399,17 +439,46 @@ def main(argv=None):
 
     logger.info("Found %d mask files", len(mask_files))
 
-    for mask_path in mask_files:
-        process_one_mask(
-            mask_path=mask_path,
-            puncta_dir=puncta_dir,
-            output_dir=output_dir,
-            n_anchors=args.n_anchors,
-            plane=args.plane,
-            padding=args.padding,
-            epg_mu=args.epg_mu,
-            epg_lambda=args.epg_lambda,
-        )
+    if args.workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        logger.info("Using %d parallel workers", args.workers)
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(
+                    process_one_mask,
+                    mask_path=mask_path,
+                    puncta_dir=puncta_dir,
+                    output_dir=output_dir,
+                    n_anchors=args.n_anchors,
+                    plane=args.plane,
+                    padding=args.padding,
+                    epg_mu=args.epg_mu,
+                    epg_lambda=args.epg_lambda,
+                    use_gpu=use_gpu,
+                    device=args.device,
+                ): mask_path for mask_path in mask_files
+            }
+            for future in as_completed(futures):
+                mask_path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error("Failed to process %s: %s", mask_path.name, e)
+    else:
+        for mask_path in mask_files:
+            process_one_mask(
+                mask_path=mask_path,
+                puncta_dir=puncta_dir,
+                output_dir=output_dir,
+                n_anchors=args.n_anchors,
+                plane=args.plane,
+                padding=args.padding,
+                epg_mu=args.epg_mu,
+                epg_lambda=args.epg_lambda,
+                use_gpu=use_gpu,
+                device=args.device,
+            )
 
     logger.info("All done.")
 

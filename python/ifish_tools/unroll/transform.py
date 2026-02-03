@@ -12,6 +12,12 @@ The transformation works by:
 import numpy as np
 from typing import Union
 
+try:
+    import cupy as cp
+    HAS_GPU = True
+except (ImportError, Exception):
+    HAS_GPU = False
+
 
 def cart2spherical(x, y, z):
     """Convert Cartesian to spherical coordinates.
@@ -290,6 +296,8 @@ def apply_transform_to_points(
     points: np.ndarray,
     mask: np.ndarray,
     transform_params: dict,
+    use_gpu: bool = False,
+    device: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply saved unrolling transformation to arbitrary points (e.g., puncta).
 
@@ -299,12 +307,16 @@ def apply_transform_to_points(
         points: Array of shape (N, 3) with coordinates in [z, y, x] order.
         mask: 3D label mask to determine which cell each point belongs to.
         transform_params: Dictionary from unroll_clone.
+        use_gpu: If True and GPU available, use GPU acceleration.
+        device: GPU device ID.
 
     Returns:
         Tuple of:
             - transformed_points: Array of shape (N, 3) with transformed coordinates
             - cell_assignments: Array of shape (N,) with cell IDs (0 = background)
     """
+    if use_gpu and HAS_GPU:
+        return _apply_transform_to_points_gpu(points, mask, transform_params, device)
     n_points = len(points)
     transformed_points = np.full((n_points, 3), np.nan)
     cell_assignments = np.zeros(n_points, dtype=np.int32)
@@ -348,6 +360,8 @@ def transform_mask(
     transform_params: dict,
     output_shape: Union[tuple, None] = None,
     padding: int = 50,
+    use_gpu: bool = False,
+    device: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Transform a 3D label mask using rigid rotation per cell.
 
@@ -360,12 +374,16 @@ def transform_mask(
         transform_params: Dictionary from unroll_clone.
         output_shape: Shape of output mask. If None, auto-calculated.
         padding: Padding around transformed coordinates.
+        use_gpu: If True and GPU available, use GPU acceleration.
+        device: GPU device ID.
 
     Returns:
         Tuple of:
             - transformed_mask: 3D label mask in unrolled space
             - output_offset: [z, y, x] offset of output origin
     """
+    if use_gpu and HAS_GPU:
+        return _transform_mask_gpu(mask, transform_params, output_shape, padding, device)
     cells_info = transform_params["cells"]
     anchor_transforms = transform_params["anchor_transforms"]
 
@@ -428,3 +446,204 @@ def transform_mask(
         transformed_mask[valid_coords[:, 0], valid_coords[:, 1], valid_coords[:, 2]] = label
 
     return transformed_mask, output_offset
+
+
+def _transform_mask_gpu(
+    mask: np.ndarray,
+    transform_params: dict,
+    output_shape: Union[tuple, None] = None,
+    padding: int = 50,
+    device: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """GPU-accelerated mask transformation.
+
+    Vectorizes the per-cell loop by building lookup tables indexed by cell label.
+    """
+    cells_info = transform_params["cells"]
+    anchor_transforms = transform_params["anchor_transforms"]
+
+    # Determine output bounds from transformed centroids
+    all_transformed = np.array([
+        ci["centroid_transformed"] for ci in cells_info.values()
+    ])
+
+    if output_shape is None:
+        min_coords = np.floor(all_transformed.min(axis=0)).astype(int) - padding
+        max_coords = np.ceil(all_transformed.max(axis=0)).astype(int) + padding
+        output_shape = tuple(max_coords - min_coords)
+        output_offset = min_coords
+    else:
+        output_offset = np.zeros(3, dtype=int)
+
+    # Get foreground coordinates
+    foreground_coords = np.argwhere(mask > 0)
+    if len(foreground_coords) == 0:
+        return np.zeros(output_shape, dtype=mask.dtype), output_offset
+
+    voxel_labels = mask[
+        foreground_coords[:, 0], foreground_coords[:, 1], foreground_coords[:, 2]
+    ]
+
+    # Build lookup tables: indexed by label
+    # Find max label to size arrays
+    max_label = int(voxel_labels.max()) + 1
+
+    # Arrays indexed by label: centroids_orig, centroids_trans, rotation_matrices
+    centroids_orig = np.zeros((max_label, 3), dtype=np.float64)
+    centroids_trans = np.zeros((max_label, 3), dtype=np.float64)
+    rotation_matrices = np.zeros((max_label, 3, 3), dtype=np.float64)
+    valid_labels = np.zeros(max_label, dtype=bool)
+
+    for cell_key, cell_info in cells_info.items():
+        label = int(cell_key)
+        if label >= max_label:
+            continue
+        centroids_orig[label] = cell_info["centroid_original"]
+        centroids_trans[label] = cell_info["centroid_transformed"]
+        ordered_pos = cell_info["ordered_anchor_pos"]
+        rotation_matrices[label] = anchor_transforms[ordered_pos]["rotation_matrix"]
+        valid_labels[label] = True
+
+    with cp.cuda.Device(device):
+        # Move to GPU
+        fg_coords_gpu = cp.asarray(foreground_coords, dtype=cp.float64)
+        labels_gpu = cp.asarray(voxel_labels, dtype=cp.int32)
+        centroids_orig_gpu = cp.asarray(centroids_orig, dtype=cp.float64)
+        centroids_trans_gpu = cp.asarray(centroids_trans, dtype=cp.float64)
+        rot_matrices_gpu = cp.asarray(rotation_matrices, dtype=cp.float64)
+        valid_labels_gpu = cp.asarray(valid_labels)
+
+        # Filter to valid labels only
+        valid_mask = valid_labels_gpu[labels_gpu]
+        fg_coords_valid = fg_coords_gpu[valid_mask]
+        labels_valid = labels_gpu[valid_mask]
+
+        if len(labels_valid) == 0:
+            return np.zeros(output_shape, dtype=mask.dtype), output_offset
+
+        # Vectorized transform: lookup centroids and rotation matrices by label
+        c_orig = centroids_orig_gpu[labels_valid]  # (N, 3)
+        c_trans = centroids_trans_gpu[labels_valid]  # (N, 3)
+        R = rot_matrices_gpu[labels_valid]  # (N, 3, 3)
+
+        # Compute offsets from original centroids
+        offsets = fg_coords_valid - c_orig  # (N, 3)
+
+        # Apply rotation: (N, 3, 3) @ (N, 3, 1) -> (N, 3, 1) -> (N, 3)
+        offsets_rotated = cp.einsum('nij,nj->ni', R, offsets)
+
+        # Translate to transformed centroids
+        transformed_coords = c_trans + offsets_rotated
+
+        # Adjust for output offset and round to integers
+        adjusted = transformed_coords - cp.asarray(output_offset, dtype=cp.float64)
+        int_coords = cp.round(adjusted).astype(cp.int32)
+
+        # Bounds check
+        valid_bounds = (
+            (int_coords[:, 0] >= 0) & (int_coords[:, 0] < output_shape[0]) &
+            (int_coords[:, 1] >= 0) & (int_coords[:, 1] < output_shape[1]) &
+            (int_coords[:, 2] >= 0) & (int_coords[:, 2] < output_shape[2])
+        )
+
+        final_coords = int_coords[valid_bounds]
+        final_labels = labels_valid[valid_bounds]
+
+        # Create output mask on GPU
+        transformed_mask_gpu = cp.zeros(output_shape, dtype=cp.int32)
+        transformed_mask_gpu[final_coords[:, 0], final_coords[:, 1], final_coords[:, 2]] = final_labels
+
+        # Transfer back to CPU
+        transformed_mask = cp.asnumpy(transformed_mask_gpu).astype(mask.dtype)
+
+    return transformed_mask, output_offset
+
+
+def _apply_transform_to_points_gpu(
+    points: np.ndarray,
+    mask: np.ndarray,
+    transform_params: dict,
+    device: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """GPU-accelerated point transformation.
+
+    Vectorizes the per-point loop using batch operations.
+    """
+    n_points = len(points)
+    cells_info = transform_params["cells"]
+    anchor_transforms = transform_params["anchor_transforms"]
+
+    # Build lookup tables indexed by label
+    max_label = int(mask.max()) + 1
+
+    centroids_orig = np.zeros((max_label, 3), dtype=np.float64)
+    centroids_trans = np.zeros((max_label, 3), dtype=np.float64)
+    rotation_matrices = np.zeros((max_label, 3, 3), dtype=np.float64)
+    valid_labels = np.zeros(max_label, dtype=bool)
+
+    for cell_key, cell_info in cells_info.items():
+        label = int(cell_key)
+        if label >= max_label:
+            continue
+        centroids_orig[label] = cell_info["centroid_original"]
+        centroids_trans[label] = cell_info["centroid_transformed"]
+        ordered_pos = cell_info["ordered_anchor_pos"]
+        rotation_matrices[label] = anchor_transforms[ordered_pos]["rotation_matrix"]
+        valid_labels[label] = True
+
+    with cp.cuda.Device(device):
+        # Move to GPU
+        points_gpu = cp.asarray(points, dtype=cp.float64)
+        mask_gpu = cp.asarray(mask)
+        centroids_orig_gpu = cp.asarray(centroids_orig, dtype=cp.float64)
+        centroids_trans_gpu = cp.asarray(centroids_trans, dtype=cp.float64)
+        rot_matrices_gpu = cp.asarray(rotation_matrices, dtype=cp.float64)
+        valid_labels_gpu = cp.asarray(valid_labels)
+
+        # Round points to integer indices
+        int_points = cp.round(points_gpu).astype(cp.int32)
+
+        # Bounds check
+        in_bounds = (
+            (int_points[:, 0] >= 0) & (int_points[:, 0] < mask.shape[0]) &
+            (int_points[:, 1] >= 0) & (int_points[:, 1] < mask.shape[1]) &
+            (int_points[:, 2] >= 0) & (int_points[:, 2] < mask.shape[2])
+        )
+
+        # Initialize outputs
+        transformed_points_gpu = cp.full((n_points, 3), cp.nan, dtype=cp.float64)
+        cell_assignments_gpu = cp.zeros(n_points, dtype=cp.int32)
+
+        # Get cell IDs for in-bounds points
+        in_bounds_idx = cp.where(in_bounds)[0]
+        in_bounds_coords = int_points[in_bounds]
+
+        cell_ids = mask_gpu[in_bounds_coords[:, 0], in_bounds_coords[:, 1], in_bounds_coords[:, 2]]
+        cell_assignments_gpu[in_bounds_idx] = cell_ids
+
+        # Filter to valid cells (non-background and in cells_info)
+        valid_cell_mask = (cell_ids > 0) & valid_labels_gpu[cell_ids]
+        valid_idx = in_bounds_idx[valid_cell_mask]
+        valid_cell_ids = cell_ids[valid_cell_mask]
+
+        if len(valid_idx) > 0:
+            # Get original points for valid indices
+            valid_points = points_gpu[valid_idx]
+
+            # Lookup transforms
+            c_orig = centroids_orig_gpu[valid_cell_ids]
+            c_trans = centroids_trans_gpu[valid_cell_ids]
+            R = rot_matrices_gpu[valid_cell_ids]
+
+            # Compute transformation
+            offsets = valid_points - c_orig
+            offsets_rotated = cp.einsum('nij,nj->ni', R, offsets)
+            transformed = c_trans + offsets_rotated
+
+            transformed_points_gpu[valid_idx] = transformed
+
+        # Transfer back to CPU
+        transformed_points = cp.asnumpy(transformed_points_gpu)
+        cell_assignments = cp.asnumpy(cell_assignments_gpu)
+
+    return transformed_points, cell_assignments
