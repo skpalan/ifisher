@@ -43,6 +43,7 @@ count-matrix = "ifish_tools.countmatrix.cli:main"
 count-qc = "ifish_tools.countmatrix.qc_cli:main"
 clone-extract = "ifish_tools.cloneextract.cli:main"
 unroll = "ifish_tools.unroll.cli:main"
+plot-spatial = "ifish_tools.plotting.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
