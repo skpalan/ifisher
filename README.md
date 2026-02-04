@@ -8,6 +8,7 @@
 - **RS-FISH Integration**: Batch processing wrapper for [RS-FISH](https://github.com/PreibischLab/RS-FISH) spot detection
 - **3D Segmentation**: State-of-the-art 3D cell segmentation using [u-Segment3D](https://github.com/DanuserLab/u-segment3D) with Cellpose
 - **Clone Unrolling**: 3D clone transformation via principal curve analysis
+- **Spatial Visualization**: Publication-ready 3D expression heatmaps with customizable colormaps
 
 ## Installation
 
@@ -275,7 +276,58 @@ output_dir/brain{ID}_clone{N}/
   puncta/*.csv           # Transformed puncta per round
 ```
 
+### 6. Spatial Expression Plotting
+
+Generate publication-ready 3D spatial expression heatmaps for unrolled tissues.
+
+**Command Line:**
+```bash
+python -m ifish_tools.plotting.cli \
+  --matrix-dir /path/to/h5ad \
+  --unroll-dir /path/to/unrolled \
+  --raw-mask-dir /path/to/raw_masks \
+  --output-dir /path/to/plots \
+  --workers 12 \
+  --cmap viridis
+```
+
+**Key Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--matrix-dir` | (required) | Directory with .h5ad count matrix files |
+| `--unroll-dir` | (required) | Directory with unrolled outputs |
+| `--raw-mask-dir` | auto | Directory with raw (non-unrolled) masks |
+| `--output-dir` | (required) | Output directory for plots |
+| `--genes` | all | Specific genes to plot |
+| `--cmap` | viridis | Matplotlib colormap for expression |
+| `--dpi` | 300 | Output resolution |
+| `--workers`, `-j` | 1 | Parallel workers |
+
+**Output:**
+- 2×3 panel PNG per gene per clone:
+  - Row 1: Unrolled tissue (random colors, expression heatmap, centroids)
+  - Row 2: Raw tissue (same 3 panels)
+
 **Python API:**
+```python
+from ifish_tools.plotting import (
+    plot_spatial_expression_3d,
+    process_all_clones,
+)
+
+# Generate all plots
+outputs = process_all_clones(
+    matrix_dir="matrices/",
+    unroll_dir="unrolled/",
+    raw_mask_dir="masks/",
+    output_dir="plots/",
+    cmap="viridis",
+    workers=12,
+)
+```
+
+**Python API (Unroll):**
 ```python
 from ifish_tools.unroll import (
     compute_centroids,
@@ -347,14 +399,19 @@ ifish_tools/
 │   ├── core.py            # Matrix assembly
 │   ├── regis_puncta.py    # Registered puncta lookup
 │   └── qc.py              # Quality-control metrics
-└── unroll/                # Clone unrolling
+├── unroll/                # Clone unrolling
+│   ├── __init__.py
+│   ├── __main__.py         # python -m entry point
+│   ├── cli.py              # Command-line interface + QC plots
+│   ├── endpoints.py        # Auto endpoint detection
+│   ├── principal_curve.py  # ElPiGraph principal curve fitting
+│   ├── transform.py        # Spherical unrolling + rigid rotation
+│   └── io.py               # I/O utilities
+└── plotting/              # Spatial expression visualization
     ├── __init__.py
-    ├── __main__.py         # python -m entry point
-    ├── cli.py              # Command-line interface + QC plots
-    ├── endpoints.py        # Auto endpoint detection
-    ├── principal_curve.py  # ElPiGraph principal curve fitting
-    ├── transform.py        # Spherical unrolling + rigid rotation
-    └── io.py               # I/O utilities
+    ├── cli.py              # Command-line interface
+    ├── core.py             # 3D plotting functions
+    └── io.py               # Data loading utilities
 ```
 
 ## Dependencies
@@ -506,5 +563,5 @@ For questions or issues:
 
 ---
 
-**Version:** 0.1.0  
-**Last Updated:** January 2026
+**Version:** 0.1.0
+**Last Updated:** February 2026

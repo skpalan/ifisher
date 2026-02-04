@@ -56,8 +56,8 @@ Examples:
     parser.add_argument(
         "--cmap",
         type=str,
-        default="RdYlGn",
-        help="Matplotlib colormap for expression (default: RdYlGn).",
+        default="viridis",
+        help="Matplotlib colormap for expression (default: viridis).",
     )
     parser.add_argument(
         "--dpi",
