@@ -134,6 +134,21 @@ def find_matching_puncta(puncta_dir: Path, brain_id: str) -> list[Path]:
     return sorted(puncta_dir.glob(pattern))
 
 
+def set_axes_equal_3d(ax):
+    """Set equal aspect ratio for 3D plot axes to preserve spatial relationships."""
+    limits = np.array([
+        ax.get_xlim3d(),
+        ax.get_ylim3d(),
+        ax.get_zlim3d(),
+    ])
+    origin = np.mean(limits, axis=1)
+    radius = 0.5 * np.max(np.abs(limits[:, 1] - limits[:, 0]))
+    ax.set_xlim3d([origin[0] - radius, origin[0] + radius])
+    ax.set_ylim3d([origin[1] - radius, origin[1] + radius])
+    ax.set_zlim3d([origin[2] - radius, origin[2] + radius])
+    ax.set_box_aspect([1, 1, 1])
+
+
 def plot_qc(
     centroids: dict[int, np.ndarray],
     transformed_centroids: dict[int, np.ndarray],
@@ -184,6 +199,7 @@ def plot_qc(
         [ordered_anchor_orig[-1, 2]], [ordered_anchor_orig[-1, 1]], [ordered_anchor_orig[-1, 0]],
         c="blue", s=100, marker="*", zorder=10, label="End",
     )
+    set_axes_equal_3d(ax1)
     ax1.set_title("Original centroids")
     ax1.set_xlabel("X"); ax1.set_ylabel("Y"); ax1.set_zlabel("Z")
     ax1.legend(fontsize=7)
@@ -206,6 +222,7 @@ def plot_qc(
         [curve_trans[-1, 2]], [curve_trans[-1, 1]], [curve_trans[-1, 0]],
         c="blue", s=100, marker="*", zorder=10, label="End",
     )
+    set_axes_equal_3d(ax2)
     ax2.set_title("Unrolled centroids")
     ax2.set_xlabel("X"); ax2.set_ylabel("Y"); ax2.set_zlabel("Z")
     ax2.legend(fontsize=7)
@@ -238,6 +255,7 @@ def plot_qc(
         [ordered_anchor_orig[-1, 2]], [ordered_anchor_orig[-1, 1]], [ordered_anchor_orig[-1, 0]],
         c="blue", s=100, marker="*", zorder=10, label="End",
     )
+    set_axes_equal_3d(ax3)
     ax3.set_title("Original mask voxels")
     ax3.set_xlabel("X"); ax3.set_ylabel("Y"); ax3.set_zlabel("Z")
     ax3.legend(fontsize=7)
@@ -269,12 +287,15 @@ def plot_qc(
         [curve_trans[-1, 2]], [curve_trans[-1, 1]], [curve_trans[-1, 0]],
         c="blue", s=100, marker="*", zorder=10, label="End",
     )
+    set_axes_equal_3d(ax4)
     ax4.set_title("Unrolled mask voxels")
     ax4.set_xlabel("X"); ax4.set_ylabel("Y"); ax4.set_zlabel("Z")
     ax4.legend(fontsize=7)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    # Note: Do NOT use bbox_inches="tight" with 3D plots - it can cause
+    # matplotlib to create extremely large figures (millions of pixels wide)
+    plt.savefig(save_path, dpi=150)
     plt.close(fig)
 
 
@@ -440,10 +461,10 @@ def main(argv=None):
     logger.info("Found %d mask files", len(mask_files))
 
     if args.workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         logger.info("Using %d parallel workers", args.workers)
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
                 executor.submit(
                     process_one_mask,
