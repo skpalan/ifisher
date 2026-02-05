@@ -283,7 +283,8 @@ def register_puncta_for_round(
     bbox_reg: Dict[str, int],
     pixel_size: float,
     ref_step: float,
-    output_path: Optional[Path] = None
+    output_path: Optional[Path] = None,
+    um_output_path: Optional[Path] = None
 ) -> Optional[pd.DataFrame]:
     """
     Register puncta for one round using full pipeline.
@@ -362,10 +363,10 @@ def register_puncta_for_round(
         logger.warning(f"No puncta within bbox after affine: {puncta_csv}")
         return None
     
-    # Step 7: Shift to cropped coordinates (1-based)
-    x_crop = x_ref - bbox_reg['ymin'] + 1
-    y_crop = y_ref - bbox_reg['xmin'] + 1
-    z_crop = z_ref - bbox_reg['zmin'] + 1
+    # Step 7: Shift to cropped coordinates (0-based after subtraction)
+    x_crop = x_ref - bbox_reg['ymin']
+    y_crop = y_ref - bbox_reg['xmin']
+    z_crop = z_ref - bbox_reg['zmin']
     
     # Step 8: Apply demons displacement
     # Build puncta array with extra columns for intensity
@@ -376,9 +377,9 @@ def register_puncta_for_round(
     # Step 9: Remove out-of-bounds puncta
     Ny, Nx, Nz, _ = Dfull.shape
     final_mask = (
-        (puncta_registered[:, 0] >= 1) & (puncta_registered[:, 0] <= Nx) &
-        (puncta_registered[:, 1] >= 1) & (puncta_registered[:, 1] <= Ny) &
-        (puncta_registered[:, 2] >= 1) & (puncta_registered[:, 2] <= Nz)
+        (puncta_registered[:, 0] > 0) & (puncta_registered[:, 0] <= Nx) &
+        (puncta_registered[:, 1] > 0) & (puncta_registered[:, 1] <= Ny) &
+        (puncta_registered[:, 2] > 0) & (puncta_registered[:, 2] <= Nz)
     )
     
     puncta_final = puncta_registered[final_mask]
@@ -388,11 +389,11 @@ def register_puncta_for_round(
         return None
     
     # Create output DataFrame with MATLAB-compatible format
-    # Convert back to 0-based for output
+    # Coordinates are already 0-based after bbox subtraction
     result_df = pd.DataFrame({
-        'x': puncta_final[:, 0] - 1,
-        'y': puncta_final[:, 1] - 1,
-        'z': puncta_final[:, 2] - 1,
+        'x': puncta_final[:, 0],
+        'y': puncta_final[:, 1],
+        'z': puncta_final[:, 2],
         't': 0,
         'r': DEFAULT_SPOT_RADIUS,
         'cell_id': '',
@@ -404,6 +405,16 @@ def register_puncta_for_round(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         result_df.to_csv(output_path, index=False)
         logger.info(f"Saved {len(result_df)} registered puncta to {output_path}")
+    
+    # Save um output if requested
+    if um_output_path is not None:
+        um_output_path.parent.mkdir(parents=True, exist_ok=True)
+        um_df = result_df.copy()
+        um_df['x'] = um_df['x'] * pixel_size
+        um_df['y'] = um_df['y'] * pixel_size
+        um_df['z'] = um_df['z'] * ref_step
+        um_df.to_csv(um_output_path, index=False)
+        logger.info(f"Saved {len(um_df)} registered puncta (um) to {um_output_path}")
     
     return result_df
 
@@ -460,7 +471,7 @@ def register_brain(
     # Get pixel size from H5 attributes
     try:
         with h5py.File(ref_h5_path, 'r') as f:
-            pixel_size = f['/data'].attrs.get('element_size_um', [0.108, 0.108, 0.4])[0]
+            pixel_size = float(f['/data'].attrs['pixelSize'][0])
     except Exception as e:
         logger.error(f"Failed to load pixel size from {ref_h5_path}: {e}")
         raise
@@ -535,6 +546,7 @@ def register_brain(
             # Generate output filename
             stub = puncta_csv.stem
             output_path = output_dir / "pixel" / f"{stub}_regis.csv"
+            um_output_path = output_dir / "um" / f"{stub}_regis_um.csv"
             
             # Register puncta
             result = register_puncta_for_round(
@@ -544,7 +556,8 @@ def register_brain(
                 bbox_reg,
                 pixel_size,
                 ref_step,
-                output_path
+                output_path,
+                um_output_path
             )
             
             if result is None:
