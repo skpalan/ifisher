@@ -19,6 +19,7 @@ from .io import (
     build_label_to_expression_map,
     find_matching_clones,
     find_raw_mask_path,
+    get_nb_cell_id,
     get_original_centroids,
     get_transformed_centroids,
     load_anndata,
@@ -39,6 +40,51 @@ RCPARAMS = {
     "xtick.labelsize": 9,
     "ytick.labelsize": 9,
 }
+
+# NB (neuroblast) visualization constants
+NB_OUTLIER_COLOR = "#DAA520"  # Goldenrod (dark yellow)
+NB_MARKER = "*"  # Star marker
+NB_MARKER_SIZE = 150  # Larger than regular cells (30)
+NB_EDGE_COLOR = "black"
+NB_ANNOTATION_OFFSET = 20  # Z offset for text annotation
+
+
+def is_nb_outlier(
+    label_to_expr: dict[int, float],
+    nb_id: Optional[int],
+) -> tuple[bool, str]:
+    """Check if NB expression is an outlier using IQR method.
+
+    Args:
+        label_to_expr: Dict mapping cell label to expression value.
+        nb_id: NB cell label (or None).
+
+    Returns:
+        Tuple of (is_outlier: bool, direction: str).
+        direction is 'high', 'low', or 'normal'.
+    """
+    if nb_id is None or nb_id not in label_to_expr:
+        return False, "normal"
+
+    nb_expr = label_to_expr[nb_id]
+    other_expr = [v for k, v in label_to_expr.items() if k != nb_id]
+
+    if len(other_expr) < 4:  # Need enough data for IQR
+        return False, "normal"
+
+    q1 = np.percentile(other_expr, 25)
+    q3 = np.percentile(other_expr, 75)
+    iqr = q3 - q1
+
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+
+    if nb_expr > upper_bound:
+        return True, "high"
+    elif nb_expr < lower_bound and nb_expr > 0:  # Only flag low if non-zero
+        return True, "low"
+
+    return False, "normal"
 
 
 def _set_3d_equal_aspect(ax, fg_data):
@@ -73,6 +119,9 @@ def _plot_mask_row(
     cmap: str,
     norm: Normalize,
     max_voxels: int,
+    nb_id: Optional[int] = None,
+    nb_is_outlier: bool = False,
+    nb_direction: str = "normal",
 ):
     """Plot a row of 3 panels for a mask (random colors, expression, centroids).
 
@@ -86,6 +135,9 @@ def _plot_mask_row(
         cmap: Colormap for expression
         norm: Normalization for expression values
         max_voxels: Maximum voxels to plot
+        nb_id: Neuroblast cell ID (or None)
+        nb_is_outlier: Whether NB is an outlier
+        nb_direction: 'high', 'low', or 'normal'
     """
     ax1, ax2, ax3 = axes
 
@@ -136,19 +188,54 @@ def _plot_mask_row(
     for i, lbl in enumerate(labels):
         expr_values[i] = label_to_expr.get(lbl, 0)
 
-    scatter2 = ax2.scatter(
-        fg[:, 2],
-        fg[:, 1],
-        fg[:, 0],
-        c=expr_values,
-        cmap=cmap,
-        norm=norm,
-        s=1,
-        alpha=0.6,
-    )
+    # If NB is outlier, plot it separately in dark yellow
+    scatter2 = None
+    if nb_id is not None and nb_is_outlier:
+        nb_mask = labels == nb_id
+        non_nb_mask = ~nb_mask
+
+        # Plot non-NB voxels first
+        if np.any(non_nb_mask):
+            scatter2 = ax2.scatter(
+                fg[non_nb_mask, 2],
+                fg[non_nb_mask, 1],
+                fg[non_nb_mask, 0],
+                c=expr_values[non_nb_mask],
+                cmap=cmap,
+                norm=norm,
+                s=1,
+                alpha=0.6,
+            )
+
+        # Plot NB voxels in dark yellow
+        if np.any(nb_mask):
+            ax2.scatter(
+                fg[nb_mask, 2],
+                fg[nb_mask, 1],
+                fg[nb_mask, 0],
+                c=NB_OUTLIER_COLOR,
+                s=2,
+                alpha=0.8,
+                label=f"NB ({nb_direction})",
+            )
+            ax2.legend(fontsize=7, loc="upper right")
+    else:
+        # Standard plotting without NB highlighting
+        scatter2 = ax2.scatter(
+            fg[:, 2],
+            fg[:, 1],
+            fg[:, 0],
+            c=expr_values,
+            cmap=cmap,
+            norm=norm,
+            s=1,
+            alpha=0.6,
+        )
+
     _set_3d_equal_aspect(ax2, fg)
-    cbar2 = plt.colorbar(scatter2, ax=ax2, shrink=0.5, pad=0.1)
-    cbar2.set_label("Expr", fontsize=9)
+    if scatter2 is not None:
+        cbar2 = plt.colorbar(scatter2, ax=ax2, shrink=0.5, pad=0.1)
+        cbar2.set_label("Expr", fontsize=9)
     ax2.set_xlabel("X")
     ax2.set_ylabel("Y")
     ax2.set_zlabel("Z")
@@ -162,23 +249,75 @@ def _plot_mask_row(
         coords = np.array([centroids[c] for c in cell_ids])  # (N, 3) xyz
         expr = np.array([label_to_expr.get(c, 0) for c in cell_ids])
 
-        scatter3 = ax3.scatter(
-            coords[:, 0],  # X
-            coords[:, 1],  # Y
-            coords[:, 2],  # Z
-            c=expr,
-            cmap=cmap,
-            norm=norm,
-            s=30,
-            alpha=0.8,
-            edgecolors="white",
-            linewidths=0.5,
-        )
+        # Separate NB from other cells
+        nb_idx = [i for i, c in enumerate(cell_ids) if c == nb_id]
+        non_nb_idx = [i for i, c in enumerate(cell_ids) if c != nb_id]
+
+        # Plot non-NB cells as circles
+        if len(non_nb_idx) > 0:
+            scatter3 = ax3.scatter(
+                coords[non_nb_idx, 0],  # X
+                coords[non_nb_idx, 1],  # Y
+                coords[non_nb_idx, 2],  # Z
+                c=expr[non_nb_idx],
+                cmap=cmap,
+                norm=norm,
+                s=30,
+                alpha=0.8,
+                edgecolors="white",
+                linewidths=0.5,
+            )
+
+        # Plot NB as star (always, but different color if outlier)
+        if len(nb_idx) > 0:
+            nb_expr_val = expr[nb_idx[0]]
+            if nb_is_outlier:
+                nb_color = NB_OUTLIER_COLOR
+            else:
+                # Get colormap object from string and apply normalization
+                import matplotlib.cm as cm
+                cmap_obj = cm.get_cmap(cmap)
+                nb_color = cmap_obj(norm(nb_expr_val))
+
+            ax3.scatter(
+                coords[nb_idx, 0],  # X
+                coords[nb_idx, 1],  # Y
+                coords[nb_idx, 2],  # Z
+                c=[nb_color],
+                s=NB_MARKER_SIZE,
+                marker=NB_MARKER,
+                alpha=1.0,
+                edgecolors=NB_EDGE_COLOR,
+                linewidths=1,
+                zorder=10,
+            )
+
+            # Add annotation with expression value
+            nb_coord = coords[nb_idx[0]]
+            annotation = f"NB: {nb_expr_val:.1f}"
+            if nb_is_outlier:
+                annotation += f" ({nb_direction}!)"
+
+            ax3.text(
+                nb_coord[0],
+                nb_coord[1],
+                nb_coord[2] + NB_ANNOTATION_OFFSET,
+                annotation,
+                fontsize=8,
+                fontweight="bold",
+                color="#8B6914",  # Dark goldenrod for text
+                ha="center",
+                zorder=11,
+            )
+
         # Set aspect ratio for centroids
         fg_centroids = np.column_stack([coords[:, 2], coords[:, 1], coords[:, 0]])  # Convert to zyx
         _set_3d_equal_aspect(ax3, fg_centroids)
-        cbar3 = plt.colorbar(scatter3, ax=ax3, shrink=0.5, pad=0.1)
-        cbar3.set_label("Expr", fontsize=9)
+
+        # Add colorbar (use scatter3 if it exists, otherwise create from expression range)
+        if len(non_nb_idx) > 0:
+            cbar3 = plt.colorbar(scatter3, ax=ax3, shrink=0.5, pad=0.1)
+            cbar3.set_label("Expr", fontsize=9)
     else:
         ax3.text(0.5, 0.5, 0.5, "No cells", ha="center", va="center")
 
@@ -201,6 +340,9 @@ def plot_spatial_expression_3d(
     figsize: tuple = (20, 14),
     dpi: int = 300,
     max_voxels: int = 50000,
+    nb_id: Optional[int] = None,
+    nb_is_outlier: bool = False,
+    nb_direction: str = "normal",
 ) -> None:
     """Create 2×3 panel 3D visualization of gene expression.
 
@@ -223,9 +365,18 @@ def plot_spatial_expression_3d(
     """
     plt.rcParams.update(RCPARAMS)
 
-    # Calculate global expression range for consistent colorbar
-    all_expr = list(label_to_expr.values())
-    vmax = max(all_expr) if all_expr and max(all_expr) > 0 else 1
+    # Calculate expression range for colorbar
+    # If NB is outlier, exclude it from normalization to better show variation in other cells
+    if nb_is_outlier and nb_id is not None and nb_id in label_to_expr:
+        non_nb_expr = [v for k, v in label_to_expr.items() if k != nb_id]
+        if non_nb_expr and max(non_nb_expr) > 0:
+            vmax = max(non_nb_expr)
+        else:
+            vmax = 1
+    else:
+        all_expr = list(label_to_expr.values())
+        vmax = max(all_expr) if all_expr and max(all_expr) > 0 else 1
+    
     norm = Normalize(vmin=0, vmax=vmax)
 
     # Create figure with 2×3 subplots
@@ -247,6 +398,9 @@ def plot_spatial_expression_3d(
         cmap=cmap,
         norm=norm,
         max_voxels=max_voxels,
+        nb_id=nb_id,
+        nb_is_outlier=nb_is_outlier,
+        nb_direction=nb_direction,
     )
 
     # Row 2: Raw masks
@@ -265,6 +419,9 @@ def plot_spatial_expression_3d(
             cmap=cmap,
             norm=norm,
             max_voxels=max_voxels,
+            nb_id=nb_id,
+            nb_is_outlier=nb_is_outlier,
+            nb_direction=nb_direction,
         )
     else:
         for ax in [ax4, ax5, ax6]:
@@ -339,6 +496,16 @@ def process_clone_gene(
     if len(label_to_expr) == 0:
         raise ValueError(f"No expression data for {gene} in {clone_name}")
 
+    # Detect NB and check if it's an outlier
+    nb_id = get_nb_cell_id(transform_data)
+    nb_is_outlier, nb_direction = is_nb_outlier(label_to_expr, nb_id)
+
+    if nb_is_outlier and nb_id is not None:
+        nb_expr = label_to_expr.get(nb_id, 0)
+        logger.info(
+            f"  NB (cell {nb_id}) is {nb_direction} outlier for {gene}: {nb_expr:.1f}"
+        )
+
     # Create output path: output_dir/gene/clone_gene.png
     gene_dir = output_dir / gene
     output_path = gene_dir / f"{clone_name}_{gene}.png"
@@ -356,6 +523,9 @@ def process_clone_gene(
         cmap=cmap,
         dpi=dpi,
         max_voxels=max_voxels,
+        nb_id=nb_id,
+        nb_is_outlier=nb_is_outlier,
+        nb_direction=nb_direction,
     )
 
     return output_path

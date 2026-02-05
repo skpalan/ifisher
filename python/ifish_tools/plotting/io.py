@@ -374,3 +374,28 @@ def find_matching_clones(
             logger.debug(f"No unroll data for {clone_name}")
 
     return matches
+
+
+def get_nb_cell_id(transform_data: dict) -> Optional[int]:
+    """Get the neuroblast (NB) cell ID from transform data.
+
+    NB is identified as the cell with ordered_anchor_pos == 0
+    (at the start of the unrolled clone, representing the neuroblast).
+
+    Args:
+        transform_data: Loaded transform.json data.
+
+    Returns:
+        Cell label (int) of NB, or None if not found.
+    """
+    cells = transform_data.get("cells", {})
+    min_pos = float("inf")
+    nb_id = None
+
+    for cell_id_str, cell_info in cells.items():
+        pos = cell_info.get("ordered_anchor_pos", float("inf"))
+        if pos < min_pos:
+            min_pos = pos
+            nb_id = int(cell_id_str)
+
+    return nb_id
