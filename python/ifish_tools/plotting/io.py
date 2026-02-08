@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Union
 
@@ -9,6 +10,9 @@ import anndata as ad
 import numpy as np
 import tifffile
 from scipy.spatial import KDTree
+
+# Regex to extract 'brainNN_cloneN' from any h5ad filename
+_CLONE_RE = re.compile(r"(brain\d+_clone\d+)")
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +378,144 @@ def find_matching_clones(
             logger.debug(f"No unroll data for {clone_name}")
 
     return matches
+
+
+def find_clones_multi_dir(
+    matrix_dirs: list[Path],
+    unroll_dirs: list[Path],
+    clones: Optional[list[str]] = None,
+) -> list[tuple[str, Path, Path]]:
+    """Find clones across multiple matrix and unroll directories.
+
+    Searches each directory in order; first match wins for each clone name.
+    If ``clones`` is provided, only those clones are returned (and a
+    ``ValueError`` is raised if any cannot be found).  Otherwise all clones
+    present in **both** matrix and unroll directories are returned.
+
+    Args:
+        matrix_dirs: Directories containing ``.h5ad`` files.
+        unroll_dirs: Directories containing ``brain*_clone*/`` subdirectories
+            (each with ``unrolled_mask.tif`` and ``transform.json``).
+        clones: Optional list of clone names to include.  ``None`` means
+            auto-discover (intersection of matrix and unroll directories).
+
+    Returns:
+        Sorted list of ``(clone_name, h5ad_path, unroll_path)`` tuples.
+
+    Raises:
+        ValueError: If a requested clone is missing from matrix or unroll dirs.
+    """
+    # Build {clone_name: h5ad_path} – first directory match wins.
+    # Flexible matching: extract 'brainNN_cloneN' from any filename.
+    h5ad_map: dict[str, Path] = {}
+    for mdir in matrix_dirs:
+        mdir = Path(mdir)
+        if not mdir.exists():
+            logger.warning(f"Matrix directory not found, skipping: {mdir}")
+            continue
+        # Track per-directory hits to detect ambiguous matches
+        dir_hits: dict[str, list[Path]] = {}
+        for p in sorted(mdir.glob("*.h5ad")):
+            m = _CLONE_RE.search(p.stem)
+            cname = m.group(1) if m else p.stem
+            dir_hits.setdefault(cname, []).append(p)
+        for cname, paths in dir_hits.items():
+            if len(paths) > 1:
+                raise ValueError(
+                    f"Ambiguous h5ad match for clone '{cname}' in {mdir}: "
+                    f"{[p.name for p in paths]}"
+                )
+            if cname not in h5ad_map:  # first-dir wins
+                h5ad_map[cname] = paths[0]
+
+    # Build {clone_name: unroll_path} – first directory match wins
+    unroll_map: dict[str, Path] = {}
+    for udir in unroll_dirs:
+        udir = Path(udir)
+        if not udir.exists():
+            logger.warning(f"Unroll directory not found, skipping: {udir}")
+            continue
+        for subdir in sorted(udir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            mask_ok = (subdir / "unrolled_mask.tif").exists()
+            xform_ok = (subdir / "transform.json").exists()
+            if mask_ok and xform_ok and subdir.name not in unroll_map:
+                unroll_map[subdir.name] = subdir
+
+    # Determine which clones to use
+    if clones is not None:
+        missing_h5ad = [c for c in clones if c not in h5ad_map]
+        missing_unroll = [c for c in clones if c not in unroll_map]
+        if missing_h5ad:
+            raise ValueError(
+                f"h5ad not found for clone(s): {missing_h5ad}. "
+                f"Searched dirs: {[str(d) for d in matrix_dirs]}"
+            )
+        if missing_unroll:
+            raise ValueError(
+                f"Unroll data not found for clone(s): {missing_unroll}. "
+                f"Searched dirs: {[str(d) for d in unroll_dirs]}"
+            )
+        selected = clones
+    else:
+        selected = sorted(set(h5ad_map.keys()) & set(unroll_map.keys()))
+        if not selected:
+            logger.warning("No matching clones found across provided directories")
+
+    results = [(name, h5ad_map[name], unroll_map[name]) for name in sorted(selected)]
+    logger.info(
+        f"Found {len(results)} clone(s) across {len(matrix_dirs)} matrix dir(s) "
+        f"and {len(unroll_dirs)} unroll dir(s): {[r[0] for r in results]}"
+    )
+    return results
+
+
+def build_label_to_annotation_map(
+    adata: ad.AnnData,
+    transform_data: dict,
+    annotation_col: str = "cell_type",
+    min_match_ratio: float = 0.99,
+) -> dict[int, str]:
+    """Map cell labels to annotation category strings.
+
+    Uses the same cell-matching logic as :func:`build_label_to_expression_map`
+    but reads a categorical ``obs`` column instead of expression values.
+
+    Args:
+        adata: AnnData with metadata.
+        transform_data: Loaded transform.json data.
+        annotation_col: Name of the ``obs`` column to use (e.g.
+            ``"cell_type"``, ``"naive_cell_type"``).
+        min_match_ratio: Minimum cell-match ratio.
+
+    Returns:
+        Dict mapping cell label (int) to annotation string.
+        Returns **empty dict** if ``annotation_col`` is not present in
+        ``adata.obs`` (graceful degradation for unannotated data).
+    """
+    if annotation_col not in adata.obs.columns:
+        return {}
+
+    # Reuse existing cell-matching logic
+    cell_matches = _match_cells_by_number(adata, transform_data)
+    if len(cell_matches) < adata.n_obs * 0.5:
+        spatial_matches = _match_cells_by_spatial(adata, transform_data)
+        if len(spatial_matches) > len(cell_matches):
+            cell_matches = spatial_matches
+
+    match_ratio = len(cell_matches) / adata.n_obs if adata.n_obs > 0 else 0
+    if match_ratio < min_match_ratio:
+        logger.warning(
+            f"Cell matching for annotation too low: {len(cell_matches)}/{adata.n_obs} "
+            f"({match_ratio:.1%}). Returning empty annotation map."
+        )
+        return {}
+
+    label_to_annot: dict[int, str] = {}
+    for adata_idx, transform_label in cell_matches.items():
+        label_to_annot[transform_label] = str(adata.obs[annotation_col].iloc[adata_idx])
+    return label_to_annot
 
 
 def get_nb_cell_id(transform_data: dict) -> Optional[int]:
