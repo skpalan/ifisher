@@ -327,6 +327,69 @@ outputs = process_all_clones(
 )
 ```
 
+### 7. Multi-Clone Comparison Plotting
+
+Generate side-by-side comparison figures with multiple clones per gene. Supports expression heatmaps, pseudocolor, and cell-type annotation panels.
+
+**Python API:**
+```python
+from ifish_tools.plotting import process_comparison_all_genes
+
+# Generate comparison plots for selected genes across clones
+results = process_comparison_all_genes(
+    matrix_dirs=["/path/to/h5ad_dir1", "/path/to/h5ad_dir2"],
+    unroll_dirs=["/path/to/unroll_dir1", "/path/to/unroll_dir2"],
+    output_dir="/path/to/output",
+    clones=["brain08_clone1", "brain09_clone1", "brain10_clone1"],
+    genes=["Imp", "dati", "pdm3"],         # None = all genes
+    panels=[
+        ("expression", "centroids"),        # expression centroid scatter
+        ("annotation", "centroids"),        # cell-type annotation scatter
+    ],
+    annotation_col="naive_cell_type",       # obs column for annotations
+    color_scale="per_clone",                # "shared" or "per_clone"
+    panel_height=4,
+    fontsize=9,
+    cmap="viridis",
+    dpi=300,
+    workers=12,
+)
+```
+
+**Low-Level API (single gene):**
+```python
+from ifish_tools.plotting import plot_multi_clone_comparison
+
+# Pre-loaded clone data dicts
+plot_multi_clone_comparison(
+    clone_data=[clone1_dict, clone2_dict],
+    gene_name="Imp",
+    output_path="Imp_comparison.png",
+    panels=[("expression", "centroids"), ("annotation", "centroids")],
+    color_scale="per_clone",
+    annotation_col="naive_cell_type",
+)
+```
+
+**Panel Types:**
+
+| Panel | Render Mode | Description |
+|-------|-------------|-------------|
+| `expression` | `voxels` | Expression-colored voxel heatmap |
+| `expression` | `centroids` | Expression-colored centroid scatter |
+| `pseudocolor` | `voxels` | Random-color per-cell voxels |
+| `pseudocolor` | `centroids` | Random-color centroid scatter |
+| `annotation` | `voxels` | Cell-type colored voxels |
+| `annotation` | `centroids` | Cell-type colored centroid scatter |
+
+**Key Features:**
+- Flexible multi-directory clone discovery (annotated + plain h5ad files)
+- Shared or per-clone color normalization with NB outlier exclusion
+- Configurable panel layout (rows = panel types, columns = clones)
+- Automatic aspect ratio inference from mask bounding box
+- Graceful degradation for unannotated clones
+- Parallel gene processing via ProcessPoolExecutor
+
 **Python API (Unroll):**
 ```python
 from ifish_tools.unroll import (
